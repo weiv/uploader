@@ -173,6 +173,39 @@ class UploadTests(ServerTestCase):
         self.assertEqual(status, 400)
 
 
+from urllib.parse import quote
+
+
+class DownloadTests(ServerTestCase):
+    def test_downloads_exact_content(self):
+        payload = os.urandom(server.CHUNK * 2 + 7)
+        with open(os.path.join(self.dir, "f.bin"), "wb") as f:
+            f.write(payload)
+        status, data = self.request("GET", "/download/f.bin")
+        self.assertEqual(status, 200)
+        self.assertEqual(data, payload)
+
+    def test_missing_file_404(self):
+        status, _ = self.request("GET", "/download/nope.txt")
+        self.assertEqual(status, 404)
+
+    def test_rejects_traversal(self):
+        status, _ = self.request("GET", "/download/" + quote("../server.py"))
+        self.assertIn(status, (400, 404))
+
+    def test_sets_attachment_header(self):
+        with open(os.path.join(self.dir, "f.txt"), "w") as f:
+            f.write("hi")
+        c = self.conn()
+        c.request("GET", "/download/f.txt")
+        r = c.getresponse()
+        disp = r.getheader("Content-Disposition")
+        r.read()
+        c.close()
+        self.assertIn("attachment", disp)
+        self.assertIn("f.txt", disp)
+
+
 import io
 
 

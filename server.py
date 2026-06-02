@@ -100,8 +100,35 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/files":
             self._send_json(200, list_files(UPLOAD_DIR))
+        elif parsed.path.startswith("/download/"):
+            self._serve_download(parsed.path[len("/download/"):])
         else:
             self._send_text(404, "not found")
+
+    def _serve_download(self, raw_name):
+        try:
+            name = sanitize_name(unquote(raw_name))
+        except ValueError:
+            self._send_text(400, "invalid name")
+            return
+        path = os.path.join(UPLOAD_DIR, name)
+        if not os.path.isfile(path):
+            self._send_text(404, "not found")
+            return
+        size = os.path.getsize(path)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(size))
+        self.send_header(
+            "Content-Disposition", f'attachment; filename="{name}"'
+        )
+        self.end_headers()
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(CHUNK)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
 
     def do_PUT(self):
         parsed = urlparse(self.path)
