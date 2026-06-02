@@ -51,11 +51,21 @@ membership takes effect.
 
 ## Cloudflare tunnel
 
-Point a tunnel at the local server and let Cloudflare Access enforce auth:
+A Cloudflare Tunnel both exposes the server (no inbound ports) and authenticates
+every request via Cloudflare Access before it reaches the Pi. The app has **no auth
+of its own**, so Access is mandatory — see the full walkthrough in
+[docs/cloudflare-tunnel.md](docs/cloudflare-tunnel.md).
+
+For a quick test you can run an ephemeral tunnel:
 
     cloudflared tunnel --url http://127.0.0.1:8000
 
-Or, for a named tunnel, add an ingress rule in `~/.cloudflared/config.yml`:
+⚠️ **Test only.** A quick tunnel gives a random `*.trycloudflare.com` URL with **no
+authentication** — it's an open, anonymous upload/download endpoint. Don't use it
+for anything real; set up a named tunnel + Access policy (see the guide above).
+
+For a persistent setup, use a named tunnel with an ingress rule in
+`~/.cloudflared/config.yml`:
 
     ingress:
       - hostname: files.example.com
