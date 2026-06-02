@@ -88,6 +88,8 @@ def sanitize_name(raw):
     """
     if raw is None:
         raise ValueError("missing name")
+    # strip() is intentional normalization: a name that is only whitespace
+    # (or whitespace around separators) must end up empty and be rejected.
     name = os.path.basename(raw.strip())
     if not name or name in (".", ".."):
         raise ValueError("invalid name")
@@ -151,11 +153,12 @@ class UniquePathTests(unittest.TestCase):
         self.assertEqual(os.path.basename(p), "README(1)")
 
     def test_raises_when_exhausted(self):
-        open(os.path.join(self.dir, "a.txt"), "w").close()
-        for i in range(1, 1000):
-            open(os.path.join(self.dir, f"a({i}).txt"), "w").close()
-        with self.assertRaises(RuntimeError):
-            server.unique_path(self.dir, "a.txt")
+        # Mock so every candidate "exists" — exercises the bound without
+        # creating 1000 files (this repo lives on an iCloud-synced path).
+        from unittest import mock
+        with mock.patch("os.path.exists", return_value=True):
+            with self.assertRaises(RuntimeError):
+                server.unique_path(self.dir, "a.txt")
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -221,6 +224,7 @@ class ServerTestCase(unittest.TestCase):
 
     def setUp(self):
         self.dir = tempfile.mkdtemp()
+        self._orig_dir = server.UPLOAD_DIR
         server.UPLOAD_DIR = self.dir
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         self.port = self.httpd.server_address[1]
@@ -231,6 +235,7 @@ class ServerTestCase(unittest.TestCase):
         self.httpd.shutdown()
         self.httpd.server_close()
         self.thread.join()
+        server.UPLOAD_DIR = self._orig_dir
 
     def conn(self):
         return http.client.HTTPConnection("127.0.0.1", self.port)
@@ -279,7 +284,7 @@ Add to `server.py` (imports at top, then the handler):
 ```python
 import json
 from http.server import BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 
 
 def list_files(directory):
@@ -390,27 +395,68 @@ class UploadTests(ServerTestCase):
         status, _ = self._put("..", b"x")
         self.assertEqual(status, 400)
 
-    def test_rejects_missing_content_length(self):
-        # Use a raw connection to omit Content-Length; send Connection: close.
+    def test_rejects_non_integer_content_length(self):
+        # Send an explicit non-integer Content-Length. This deterministically
+        # hits the 400 branch (int() raises) regardless of http.client version
+        # quirks around auto-injecting Content-Length for bodyless requests.
         c = self.conn()
         c.putrequest("PUT", "/upload?name=x.txt")
-        c.putheader("Connection", "close")
+        c.putheader("Content-Length", "notanumber")
         c.endheaders()
         r = c.getresponse()
         status = r.status
         r.read()
         c.close()
         self.assertEqual(status, 400)
+
+
+import io
+
+
+class StreamBodyTests(unittest.TestCase):
+    def test_copies_exact_bytes(self):
+        dst = io.BytesIO()
+        server.stream_body(io.BytesIO(b"abcdef"), dst, 6)
+        self.assertEqual(dst.getvalue(), b"abcdef")
+
+    def test_short_read_raises_incomplete(self):
+        # Source ends early (client disconnected): must raise, not silently
+        # write a truncated file.
+        dst = io.BytesIO()
+        with self.assertRaises(server.IncompleteUpload):
+            server.stream_body(io.BytesIO(b"abc"), dst, 6)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `python3 -m unittest test_server.UploadTests -v`
-Expected: FAIL — uploads hit the 404 branch (no `do_PUT`), so assertions on 201 fail.
+Run: `python3 -m unittest test_server.UploadTests test_server.StreamBodyTests -v`
+Expected: FAIL — `StreamBodyTests` fails with `AttributeError` (no `stream_body`/`IncompleteUpload`), and `UploadTests` hit the 404 branch (no `do_PUT`), so assertions on 201 fail.
 
 - [ ] **Step 3: Write minimal implementation**
 
-Add `import uuid` to the top of `server.py`, then add this method to `Handler`:
+Add `import uuid` to the top of `server.py`. Then add the read-loop helper and
+its exception at module level (near `unique_path`, above the `Handler` class) so
+they can be unit-tested directly:
+
+```python
+class IncompleteUpload(Exception):
+    """Client sent fewer bytes than Content-Length promised (disconnected)."""
+
+
+def stream_body(reader, dst, remaining):
+    """Copy exactly `remaining` bytes from `reader` to `dst` in CHUNK windows.
+
+    Raises IncompleteUpload if the source ends before `remaining` bytes are read.
+    """
+    while remaining > 0:
+        chunk = reader.read(min(CHUNK, remaining))
+        if not chunk:
+            raise IncompleteUpload()
+        dst.write(chunk)
+        remaining -= len(chunk)
+```
+
+Then add this method to `Handler`:
 
 ```python
     def do_PUT(self):
@@ -439,15 +485,17 @@ Add `import uuid` to the top of `server.py`, then add this method to `Handler`:
         tmp_path = os.path.join(UPLOAD_DIR, f".{uuid.uuid4().hex}.part")
         try:
             with open(tmp_path, "wb") as f:
-                while remaining > 0:
-                    chunk = self.rfile.read(min(CHUNK, remaining))
-                    if not chunk:
-                        raise IOError("client disconnected mid-upload")
-                    f.write(chunk)
-                    remaining -= len(chunk)
+                stream_body(self.rfile, f, remaining)
             final_path = unique_path(UPLOAD_DIR, name)
             os.rename(tmp_path, final_path)
-        except (IOError, OSError, RuntimeError):
+        except IncompleteUpload:
+            # Client fault: fewer bytes than promised.
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            self._send_text(400, "incomplete upload")
+            return
+        except (OSError, RuntimeError):
+            # Server fault: disk error, or collision space exhausted.
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
             self._send_text(500, "upload failed")
@@ -458,8 +506,8 @@ Add `import uuid` to the top of `server.py`, then add this method to `Handler`:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `python3 -m unittest test_server.UploadTests -v`
-Expected: PASS (6 tests).
+Run: `python3 -m unittest test_server.UploadTests test_server.StreamBodyTests -v`
+Expected: PASS (6 upload tests + 2 stream_body tests).
 
 - [ ] **Step 5: Commit**
 
@@ -534,7 +582,6 @@ In `server.py`, update `do_GET` to route downloads. Replace the existing `do_GET
             self._send_text(404, "not found")
 
     def _serve_download(self, raw_name):
-        from urllib.parse import unquote
         try:
             name = sanitize_name(unquote(raw_name))
         except ValueError:
@@ -883,7 +930,9 @@ install -o "$SERVICE_USER" -g "$ADMIN_GROUP" -m 0664 "$SRC_DIR/server.py" "$BASE
 # systemd unit.
 install -o root -g root -m 0644 "$SRC_DIR/uploader.service" /etc/systemd/system/uploader.service
 systemctl daemon-reload
-systemctl enable --now uploader.service
+systemctl enable uploader.service
+# restart (not just `enable --now`) so re-runs pick up an edited server.py.
+systemctl restart uploader.service
 
 echo "Done. Status:"
 systemctl --no-pager status uploader.service || true
@@ -1005,6 +1054,10 @@ authenticated, so do **not** expose port 8000 directly.
   overwritten.
 - Config via env vars: `UPLOAD_DIR` (default `/srv/uploader/files`), `PORT`
   (default `8000`). The server always binds `127.0.0.1`.
+- If you point `UPLOAD_DIR` at a directory outside `/srv/uploader/files`, you must
+  also update `ReadWritePaths=` in `uploader.service` — `ProtectSystem=strict`
+  makes everything else read-only, so writes will fail otherwise — and give the new
+  directory the same `uploader:uploader-admin` owner and `2775` mode.
 ```
 
 - [ ] **Step 2: Commit**
