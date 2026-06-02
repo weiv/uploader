@@ -22,9 +22,16 @@ PAGE = """<!DOCTYPE html>
   #drop.over { border-color: #333; background: #f5f5f5; }
   progress { width: 100%; display: none; margin-top: 1rem; }
   ul { list-style: none; padding: 0; }
-  li { display: flex; justify-content: space-between; padding: .4rem 0; border-bottom: 1px solid #eee; }
-  .size { color: #888; font-variant-numeric: tabular-nums; }
+  li { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: .4rem 0; border-bottom: 1px solid #eee; }
+  li a { overflow-wrap: anywhere; }
+  .meta { display: flex; align-items: center; gap: .8rem; white-space: nowrap; }
+  .time, .size { color: #888; font-variant-numeric: tabular-nums; }
+  button.copy, .res button { font: inherit; padding: .1rem .5rem; cursor: pointer; }
   #err { color: #b00; min-height: 1.2em; }
+  #result { margin: 1rem 0; }
+  .res { display: flex; align-items: center; gap: .5rem; padding: .3rem 0; }
+  .res .ok { color: #2a7; white-space: nowrap; }
+  .res .url { flex: 1; min-width: 0; font-family: ui-monospace, monospace; font-size: .85em; padding: .2rem .4rem; }
 </style>
 </head>
 <body>
@@ -32,6 +39,7 @@ PAGE = """<!DOCTYPE html>
 <div id="drop">Ovde baci datoteku ili <input type="file" id="file" multiple></div>
 <progress id="bar" max="100" value="0"></progress>
 <div id="err"></div>
+<div id="result"></div>
 <h2>Files</h2>
 <ul id="list"></ul>
 <script>
@@ -39,6 +47,7 @@ const drop = document.getElementById('drop');
 const fileInput = document.getElementById('file');
 const bar = document.getElementById('bar');
 const err = document.getElementById('err');
+const result = document.getElementById('result');
 const list = document.getElementById('list');
 
 function human(n) {
@@ -46,6 +55,45 @@ function human(n) {
   let i = 0;
   while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
   return (i === 0 ? n : n.toFixed(1)) + ' ' + u[i];
+}
+
+function fmtTime(s) {
+  // mtime is epoch seconds; render in the viewer's local timezone.
+  return new Date(s * 1000).toLocaleString();
+}
+
+function dlUrl(name) {
+  // location.origin -> the public tunnel URL when reached through Cloudflare,
+  // 127.0.0.1 locally; so the copied link is always correct for the viewer.
+  return location.origin + '/download/' + encodeURIComponent(name);
+}
+
+async function copy(text, btn) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (e) {
+    // Fallback for non-secure contexts where the Clipboard API is unavailable.
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (_) {}
+    document.body.removeChild(ta);
+  }
+  const old = btn.textContent;
+  btn.textContent = 'Copied';
+  setTimeout(() => { btn.textContent = old; }, 1200);
+}
+
+function copyButton(name, cls) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  if (cls) btn.className = cls;
+  btn.textContent = 'Copy';
+  btn.addEventListener('click', () => copy(dlUrl(name), btn));
+  return btn;
 }
 
 async function refresh() {
@@ -57,11 +105,36 @@ async function refresh() {
     const a = document.createElement('a');
     a.href = '/download/' + encodeURIComponent(f.name);
     a.textContent = f.name;
-    const span = document.createElement('span');
-    span.className = 'size';
-    span.textContent = human(f.size);
-    li.append(a, span);
+    const meta = document.createElement('span');
+    meta.className = 'meta';
+    const time = document.createElement('span');
+    time.className = 'time';
+    time.textContent = fmtTime(f.mtime);
+    const size = document.createElement('span');
+    size.className = 'size';
+    size.textContent = human(f.size);
+    meta.append(time, size, copyButton(f.name, 'copy'));
+    li.append(a, meta);
     list.append(li);
+  }
+}
+
+function showResults(names) {
+  result.innerHTML = '';
+  for (const name of names) {
+    const row = document.createElement('div');
+    row.className = 'res';
+    const ok = document.createElement('span');
+    ok.className = 'ok';
+    ok.textContent = '✓ ' + name;
+    const url = document.createElement('input');
+    url.className = 'url';
+    url.type = 'text';
+    url.readOnly = true;
+    url.value = dlUrl(name);
+    url.addEventListener('focus', () => url.select());
+    row.append(ok, url, copyButton(name));
+    result.append(row);
   }
 }
 
@@ -72,7 +145,15 @@ function uploadOne(file) {
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) bar.value = (e.loaded / e.total) * 100;
     };
-    xhr.onload = () => (xhr.status === 201 ? resolve() : reject(new Error(xhr.responseText || xhr.status)));
+    xhr.onload = () => {
+      if (xhr.status !== 201) {
+        reject(new Error(xhr.responseText || xhr.status));
+        return;
+      }
+      // Server returns the final saved name (post-collision, e.g. a(1).txt).
+      try { resolve(JSON.parse(xhr.responseText).name); }
+      catch (e) { resolve(file.name); }
+    };
     xhr.onerror = () => reject(new Error('network error'));
     xhr.send(file);
   });
@@ -80,13 +161,16 @@ function uploadOne(file) {
 
 async function uploadAll(files) {
   err.textContent = '';
+  result.innerHTML = '';
   bar.style.display = 'block';
+  const names = [];
   try {
     for (const file of files) {
       bar.value = 0;
-      await uploadOne(file);
+      names.push(await uploadOne(file));
     }
     await refresh();
+    showResults(names);
   } catch (e) {
     err.textContent = 'Upload failed: ' + e.message;
   } finally {
@@ -164,7 +248,10 @@ def stream_body(reader, dst, remaining):
 
 
 def list_files(directory):
-    """Return file entries (name, size), newest mtime first, excluding .part."""
+    """Return file entries (name, size, mtime), newest mtime first, excluding .part.
+
+    `mtime` is integer epoch seconds; the client renders it in local time.
+    """
     entries = []
     for name in os.listdir(directory):
         if name.endswith(".part"):
@@ -173,10 +260,14 @@ def list_files(directory):
         if not os.path.isfile(path):
             continue
         st = os.stat(path)
-        entries.append({"name": name, "size": st.st_size, "_mtime": st.st_mtime})
-    entries.sort(key=lambda e: e["_mtime"], reverse=True)
+        # Sort on full-precision mtime so sub-second-apart files order correctly;
+        # report it truncated to whole epoch seconds for the client.
+        entries.append(
+            {"name": name, "size": st.st_size, "mtime": st.st_mtime}
+        )
+    entries.sort(key=lambda e: e["mtime"], reverse=True)
     for e in entries:
-        del e["_mtime"]
+        e["mtime"] = int(e["mtime"])
     return entries
 
 

@@ -116,6 +116,24 @@ class ListingTests(ServerTestCase):
         sizes = {e["name"]: e["size"] for e in json.loads(data)}
         self.assertEqual(sizes["new.txt"], 5)
 
+    def test_entries_include_integer_mtime_consistent_with_order(self):
+        import time
+        with open(os.path.join(self.dir, "old.txt"), "w") as f:
+            f.write("old")
+        time.sleep(0.01)
+        with open(os.path.join(self.dir, "new.txt"), "w") as f:
+            f.write("newer")
+        status, data = self.request("GET", "/api/files")
+        self.assertEqual(status, 200)
+        entries = json.loads(data)
+        for e in entries:
+            self.assertIsInstance(e["mtime"], int)
+        # Newest-first ordering must agree with the reported mtimes.
+        mtimes = [e["mtime"] for e in entries]
+        self.assertEqual(mtimes, sorted(mtimes, reverse=True))
+        by_name = {e["name"]: e["mtime"] for e in entries}
+        self.assertGreaterEqual(by_name["new.txt"], by_name["old.txt"])
+
 
 class UploadTests(ServerTestCase):
     def _put(self, name, payload):
