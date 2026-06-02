@@ -29,7 +29,7 @@ PAGE = """<!DOCTYPE html>
 </head>
 <body>
 <h1>Uploader</h1>
-<div id="drop">Drop files here or <input type="file" id="file" multiple></div>
+<div id="drop">Ovde baci datoteku ili <input type="file" id="file" multiple></div>
 <progress id="bar" max="100" value="0"></progress>
 <div id="err"></div>
 <h2>Files</h2>
