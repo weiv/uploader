@@ -31,6 +31,7 @@ PAGE = """<!DOCTYPE html>
   #result { margin: 1rem 0; }
   .res { display: flex; align-items: center; gap: .5rem; padding: .3rem 0; }
   .res .ok { color: #2a7; white-space: nowrap; }
+  .res .fail { color: #b00; }
   .res .url { flex: 1; min-width: 0; font-family: ui-monospace, monospace; font-size: .85em; padding: .2rem .4rem; }
 </style>
 </head>
@@ -98,6 +99,7 @@ function copyButton(name, cls) {
 
 async function refresh() {
   const res = await fetch('/api/files');
+  if (!res.ok) throw new Error('file list HTTP ' + res.status);
   const files = await res.json();
   list.innerHTML = '';
   for (const f of files) {
@@ -119,42 +121,56 @@ async function refresh() {
   }
 }
 
-function showResults(names) {
-  result.innerHTML = '';
-  for (const name of names) {
-    const row = document.createElement('div');
-    row.className = 'res';
-    const ok = document.createElement('span');
-    ok.className = 'ok';
-    ok.textContent = '✓ ' + name;
+function addResult(name, ok, detail) {
+  const row = document.createElement('div');
+  row.className = 'res';
+  const label = document.createElement('span');
+  if (ok) {
+    label.className = 'ok';
+    label.textContent = '✓ ' + name;
     const url = document.createElement('input');
     url.className = 'url';
     url.type = 'text';
     url.readOnly = true;
     url.value = dlUrl(name);
     url.addEventListener('focus', () => url.select());
-    row.append(ok, url, copyButton(name));
-    result.append(row);
+    row.append(label, url, copyButton(name));
+  } else {
+    label.className = 'fail';
+    label.textContent = '✗ ' + name + ' — ' + detail;
+    row.append(label);
   }
+  result.append(row);
+}
+
+function errorDetail(xhr) {
+  if (xhr.status === 413) return 'too large for the tunnel (uploads are capped near 100 MB)';
+  if (xhr.status === 0) return 'connection dropped (network, timeout, or tunnel down)';
+  const body = (xhr.responseText || '').trim();
+  if (body && body.length <= 120) return body + ' (HTTP ' + xhr.status + ')';
+  return 'HTTP ' + xhr.status;
 }
 
 function uploadOne(file) {
-  return new Promise((resolve, reject) => {
+  // Resolves with a per-file result and never rejects, so one file's failure
+  // does not abort the rest of the batch.
+  return new Promise((resolve) => {
     const xhr = new XMLHttpRequest();
     xhr.open('PUT', '/upload?name=' + encodeURIComponent(file.name));
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) bar.value = (e.loaded / e.total) * 100;
     };
     xhr.onload = () => {
-      if (xhr.status !== 201) {
-        reject(new Error(xhr.responseText || xhr.status));
-        return;
+      if (xhr.status === 201) {
+        // Server returns the final saved name (post-collision, e.g. a(1).txt).
+        let name = file.name;
+        try { name = JSON.parse(xhr.responseText).name; } catch (e) {}
+        resolve({ ok: true, name });
+      } else {
+        resolve({ ok: false, name: file.name, detail: errorDetail(xhr) });
       }
-      // Server returns the final saved name (post-collision, e.g. a(1).txt).
-      try { resolve(JSON.parse(xhr.responseText).name); }
-      catch (e) { resolve(file.name); }
     };
-    xhr.onerror = () => reject(new Error('network error'));
+    xhr.onerror = () => resolve({ ok: false, name: file.name, detail: 'network error' });
     xhr.send(file);
   });
 }
@@ -163,18 +179,27 @@ async function uploadAll(files) {
   err.textContent = '';
   result.innerHTML = '';
   bar.style.display = 'block';
-  const names = [];
+  let anyOk = false;
   try {
     for (const file of files) {
       bar.value = 0;
-      names.push(await uploadOne(file));
+      const r = await uploadOne(file);
+      // Report each file immediately, with its copy link taken straight from
+      // the upload response — independent of the list refresh below.
+      addResult(r.name, r.ok, r.detail);
+      if (r.ok) anyOk = true;
     }
-    await refresh();
-    showResults(names);
-  } catch (e) {
-    err.textContent = 'Upload failed: ' + e.message;
   } finally {
     bar.style.display = 'none';
+  }
+  if (anyOk) {
+    // The file list is a nice-to-have; a refresh failure must NOT be reported
+    // as an upload failure (each upload already reported its own status).
+    try {
+      await refresh();
+    } catch (e) {
+      err.textContent = 'Uploaded OK, but the file list could not refresh: ' + e.message;
+    }
   }
 }
 
