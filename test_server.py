@@ -1,3 +1,5 @@
+import os
+import tempfile
 import unittest
 import server
 
@@ -22,6 +24,39 @@ class SanitizeNameTests(unittest.TestCase):
         for bad in ["", ".", "..", "a/../b/", "   ", "/"]:
             with self.assertRaises(ValueError):
                 server.sanitize_name(bad)
+
+
+class UniquePathTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def test_returns_name_when_free(self):
+        p = server.unique_path(self.dir, "a.txt")
+        self.assertEqual(os.path.basename(p), "a.txt")
+
+    def test_suffixes_on_collision(self):
+        open(os.path.join(self.dir, "a.txt"), "w").close()
+        p = server.unique_path(self.dir, "a.txt")
+        self.assertEqual(os.path.basename(p), "a(1).txt")
+
+    def test_increments_until_free(self):
+        open(os.path.join(self.dir, "a.txt"), "w").close()
+        open(os.path.join(self.dir, "a(1).txt"), "w").close()
+        p = server.unique_path(self.dir, "a.txt")
+        self.assertEqual(os.path.basename(p), "a(2).txt")
+
+    def test_name_without_extension(self):
+        open(os.path.join(self.dir, "README"), "w").close()
+        p = server.unique_path(self.dir, "README")
+        self.assertEqual(os.path.basename(p), "README(1)")
+
+    def test_raises_when_exhausted(self):
+        # Mock so every candidate "exists" — exercises the bound without
+        # creating 1000 files (this repo lives on an iCloud-synced path).
+        from unittest import mock
+        with mock.patch("os.path.exists", return_value=True):
+            with self.assertRaises(RuntimeError):
+                server.unique_path(self.dir, "a.txt")
 
 
 if __name__ == "__main__":

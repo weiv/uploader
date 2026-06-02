@@ -20,3 +20,20 @@ def sanitize_name(raw):
     if "/" in name or "\\" in name or os.sep in name:
         raise ValueError("invalid name")
     return name
+
+
+def unique_path(directory, name):
+    """Return an absolute path in `directory` for `name` that does not exist.
+
+    On collision, inserts ` (n)` before the extension: a.txt -> a(1).txt.
+    Bounded at 999 to avoid an unbounded loop; raises RuntimeError if exhausted.
+    """
+    candidate = os.path.join(directory, name)
+    if not os.path.exists(candidate):
+        return candidate
+    stem, ext = os.path.splitext(name)
+    for n in range(1, 1000):
+        candidate = os.path.join(directory, f"{stem}({n}){ext}")
+        if not os.path.exists(candidate):
+            return candidate
+    raise RuntimeError("too many name collisions")
