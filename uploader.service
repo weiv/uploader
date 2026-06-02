@@ -1,0 +1,21 @@
+[Unit]
+Description=Pi Uploader
+After=network.target
+
+[Service]
+User=uploader
+Group=uploader-admin
+UMask=002
+WorkingDirectory=/srv/uploader
+ExecStart=/usr/bin/python3 /srv/uploader/server.py
+Restart=on-failure
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/srv/uploader/files
+
+[Install]
+WantedBy=multi-user.target
