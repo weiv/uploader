@@ -117,5 +117,78 @@ class ListingTests(ServerTestCase):
         self.assertEqual(sizes["new.txt"], 5)
 
 
+class UploadTests(ServerTestCase):
+    def _put(self, name, payload):
+        c = self.conn()
+        headers = {"Content-Length": str(len(payload))}
+        c.request("PUT", "/upload?name=" + name, body=payload, headers=headers)
+        r = c.getresponse()
+        data = r.read()
+        c.close()
+        return r.status, data
+
+    def test_round_trips_bytes(self):
+        status, data = self._put("hello.txt", b"hello world")
+        self.assertEqual(status, 201)
+        self.assertEqual(json.loads(data)["name"], "hello.txt")
+        with open(os.path.join(self.dir, "hello.txt"), "rb") as f:
+            self.assertEqual(f.read(), b"hello world")
+
+    def test_multi_chunk_payload(self):
+        payload = os.urandom(server.CHUNK * 3 + 123)
+        status, data = self._put("big.bin", payload)
+        self.assertEqual(status, 201)
+        with open(os.path.join(self.dir, "big.bin"), "rb") as f:
+            self.assertEqual(f.read(), payload)
+
+    def test_collision_autorenames_and_reports(self):
+        self._put("a.txt", b"first")
+        status, data = self._put("a.txt", b"second")
+        self.assertEqual(status, 201)
+        self.assertEqual(json.loads(data)["name"], "a(1).txt")
+        with open(os.path.join(self.dir, "a(1).txt"), "rb") as f:
+            self.assertEqual(f.read(), b"second")
+
+    def test_no_part_files_left_behind(self):
+        self._put("a.txt", b"x")
+        leftovers = [n for n in os.listdir(self.dir) if n.endswith(".part")]
+        self.assertEqual(leftovers, [])
+
+    def test_rejects_bad_name(self):
+        status, _ = self._put("..", b"x")
+        self.assertEqual(status, 400)
+
+    def test_rejects_non_integer_content_length(self):
+        # Send an explicit non-integer Content-Length. This deterministically
+        # hits the 400 branch (int() raises) regardless of http.client version
+        # quirks around auto-injecting Content-Length for bodyless requests.
+        c = self.conn()
+        c.putrequest("PUT", "/upload?name=x.txt")
+        c.putheader("Content-Length", "notanumber")
+        c.endheaders()
+        r = c.getresponse()
+        status = r.status
+        r.read()
+        c.close()
+        self.assertEqual(status, 400)
+
+
+import io
+
+
+class StreamBodyTests(unittest.TestCase):
+    def test_copies_exact_bytes(self):
+        dst = io.BytesIO()
+        server.stream_body(io.BytesIO(b"abcdef"), dst, 6)
+        self.assertEqual(dst.getvalue(), b"abcdef")
+
+    def test_short_read_raises_incomplete(self):
+        # Source ends early (client disconnected): must raise, not silently
+        # write a truncated file.
+        dst = io.BytesIO()
+        with self.assertRaises(server.IncompleteUpload):
+            server.stream_body(io.BytesIO(b"abc"), dst, 6)
+
+
 if __name__ == "__main__":
     unittest.main()

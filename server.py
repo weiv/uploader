@@ -1,5 +1,6 @@
 import json
 import os
+import uuid
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, unquote
 
@@ -44,6 +45,23 @@ def unique_path(directory, name):
     raise RuntimeError("too many name collisions")
 
 
+class IncompleteUpload(Exception):
+    """Client sent fewer bytes than Content-Length promised (disconnected)."""
+
+
+def stream_body(reader, dst, remaining):
+    """Copy exactly `remaining` bytes from `reader` to `dst` in CHUNK windows.
+
+    Raises IncompleteUpload if the source ends before `remaining` bytes are read.
+    """
+    while remaining > 0:
+        chunk = reader.read(min(CHUNK, remaining))
+        if not chunk:
+            raise IncompleteUpload()
+        dst.write(chunk)
+        remaining -= len(chunk)
+
+
 def list_files(directory):
     """Return file entries (name, size), newest mtime first, excluding .part."""
     entries = []
@@ -84,3 +102,47 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, list_files(UPLOAD_DIR))
         else:
             self._send_text(404, "not found")
+
+    def do_PUT(self):
+        parsed = urlparse(self.path)
+        if parsed.path != "/upload":
+            self._send_text(404, "not found")
+            return
+
+        qs = parse_qs(parsed.query)
+        raw_name = qs.get("name", [None])[0]
+        try:
+            name = sanitize_name(raw_name)
+        except ValueError:
+            self._send_text(400, "invalid name")
+            return
+
+        length_header = self.headers.get("Content-Length")
+        try:
+            remaining = int(length_header)
+            if remaining < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            self._send_text(400, "Content-Length required")
+            return
+
+        tmp_path = os.path.join(UPLOAD_DIR, f".{uuid.uuid4().hex}.part")
+        try:
+            with open(tmp_path, "wb") as f:
+                stream_body(self.rfile, f, remaining)
+            final_path = unique_path(UPLOAD_DIR, name)
+            os.rename(tmp_path, final_path)
+        except IncompleteUpload:
+            # Client fault: fewer bytes than promised.
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            self._send_text(400, "incomplete upload")
+            return
+        except (OSError, RuntimeError):
+            # Server fault: disk error, or collision space exhausted.
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            self._send_text(500, "upload failed")
+            return
+
+        self._send_json(201, {"name": os.path.basename(final_path)})
