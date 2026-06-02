@@ -30,7 +30,7 @@ fixed directory (default `/srv/uploader/files`). Port overridable by `PORT` env 
 | Method & path            | Purpose |
 |--------------------------|---------|
 | `GET /`                  | Single inline HTML page: file picker / drag-and-drop, upload progress bar, and a list of files (name, size, download link). No external assets. |
-| `GET /api/files`         | JSON array of files: `[{"name": ..., "size": ...}, ...]`. |
+| `GET /api/files`         | JSON array of files, **newest-first** (by mtime): `[{"name": ..., "size": ...}, ...]`. Excludes `.part` temp files. |
 | `GET /download/<name>`   | Streams the file in chunks with `Content-Disposition: attachment`. |
 | `PUT /upload?name=<name>`| Streams the raw request body to disk in chunks. |
 
@@ -38,17 +38,23 @@ fixed directory (default `/srv/uploader/files`). Port overridable by `PORT` env 
 
 The browser sends the file as the **raw request body**:
 `fetch('/upload?name=' + encodeURIComponent(file.name), {method: 'PUT', body: file})`.
-The server reads `rfile` in 64 KB chunks (using `Content-Length`) and writes to disk.
 This avoids stdlib multipart parsing entirely (`cgi` is deprecated and removed in
 Python 3.13) and streams cleanly regardless of file size.
+
+**Read-loop contract:** `Content-Length` is **required**; if absent or non-integer →
+`400`. Reading past `Content-Length` on `http.server`'s `rfile` blocks indefinitely, so
+the server reads **exactly** that many bytes in 64 KB windows, tracking remaining bytes,
+and stops at zero. A short read (connection dropped mid-upload) → treat as failure, clean
+up the temp file, `400`. `Content-Type` on the PUT is ignored.
 
 ## Data Flow
 
 - **Upload:** JS picks file → `PUT /upload?name=...` raw body → server writes chunks to a
-  temp file `<final>.part` in `UPLOAD_DIR` → on success, atomically `os.rename` to the
-  sanitized, de-duplicated final name → returns final name as JSON → JS refreshes the list.
-- **Download:** `GET /download/<name>` → sanitize name → open file → write to socket in
-  64 KB chunks with correct `Content-Length` and attachment header.
+  temp file `.<uuid>.part` in `UPLOAD_DIR` → on success, atomically `os.rename` to the
+  sanitized, de-duplicated final name → returns `{"name": "<final-name>"}` as JSON (the
+  final name reflects any collision rename) → JS refreshes the list.
+- **Download:** `GET /download/<name>` → sanitize name (same rules as upload) → open file →
+  write to socket in 64 KB chunks with correct `Content-Length` and attachment header.
 
 ## Safety
 
@@ -56,10 +62,13 @@ Python 3.13) and streams cleanly regardless of file size.
   `.`/`..`, or anything still containing a path separator → 400. Guarantees transfers stay
   inside `UPLOAD_DIR`.
 - **Collision handling:** if the sanitized name exists, auto-rename `report.zip` →
-  `report(1).zip`, `report(2).zip`, … Nothing is ever overwritten.
-- **Atomic writes:** stream to `<name>.part`, then rename. A half-finished or aborted
-  upload never appears as a real file; `.part` files are cleaned up on error and excluded
-  from listings.
+  `report(1).zip`, `report(2).zip`, … The probe loop is **bounded** (1..999); if all are
+  taken → `500`. Nothing is ever overwritten.
+- **Atomic writes:** stream to a `.<uuid>.part` temp file, then `os.rename` to the final
+  name. The uuid temp name means concurrent or retried uploads never collide on the temp
+  file, and a user-supplied name like `foo.part` is treated as an ordinary file. A
+  half-finished or aborted upload never appears as a real file; `.part` files are cleaned
+  up on error and excluded from listings (`/api/files` filters the `.part` suffix).
 
 ## Error Handling
 
@@ -90,7 +99,9 @@ Python 3.13) and streams cleanly regardless of file size.
 - `WorkingDirectory=/srv/uploader`, `ExecStart=/usr/bin/python3 /srv/uploader/server.py`
 - Bound to `127.0.0.1` (in code).
 - Hardening: `NoNewPrivileges=yes`, `ProtectSystem=strict`, `ProtectHome=yes`,
-  `PrivateTmp=yes`, `ReadWritePaths=/srv/uploader/files`.
+  `PrivateTmp=yes`, `ReadWritePaths=/srv/uploader/files`. Note: `ProtectSystem=strict`
+  makes the whole filesystem read-only except paths in `ReadWritePaths`, so the upload dir
+  must be listed there (it is) — and the app must not try to write anywhere else.
 - `Restart=on-failure`.
 
 `weiv` administers via `sudo systemctl start/stop/restart/status uploader` and
@@ -102,7 +113,9 @@ Both:
 
 - **`setup.sh`** — idempotent `sudo ./setup.sh` that creates the user, group, directory
   (correct owner/mode), copies `server.py` into place, installs `uploader.service`, and
-  enables + starts it. Safe to re-run.
+  enables + starts it. Safe to re-run: guard each mutating step (e.g.
+  `getent group uploader-admin || groupadd …`, `id -u uploader >/dev/null 2>&1 || useradd …`,
+  `install -d -o … -m 2775 …`, `daemon-reload` + `enable --now` are already idempotent).
 - **`README.md`** — explains what `setup.sh` does, the manual copy-paste equivalent of each
   step, the Cloudflare tunnel hookup (point the tunnel at `http://127.0.0.1:8000`), and how
   `weiv` administers files and the service.
@@ -113,10 +126,13 @@ A stdlib `unittest` script (`test_server.py`) that starts the server against a t
 directory on an ephemeral port and verifies:
 
 1. Upload round-trips bytes exactly (incl. a multi-chunk file larger than the 64 KB buffer).
-2. Collision on an existing name auto-renames (`x.txt` → `x(1).txt`).
-3. Path-traversal names (`../x`, `a/b`, empty, `..`) are rejected with 400.
+2. Collision on an existing name auto-renames (`x.txt` → `x(1).txt`) and the response JSON
+   reports the final name.
+3. Path-traversal names (`../x`, `a/b`, empty, `..`) are rejected with 400 (on both upload
+   and download).
 4. Download returns exact content; missing file → 404.
-5. `.part` files are not shown in `/api/files`.
+5. `.part` files are not shown in `/api/files`; listing is newest-first.
+6. Upload with a missing/non-integer `Content-Length` → 400.
 
 ## File Layout
 
