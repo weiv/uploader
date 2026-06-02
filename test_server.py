@@ -176,6 +176,21 @@ class UploadTests(ServerTestCase):
 from urllib.parse import quote
 
 
+class PageTests(ServerTestCase):
+    def test_root_serves_html(self):
+        c = self.conn()
+        c.request("GET", "/")
+        r = c.getresponse()
+        ctype = r.getheader("Content-Type")
+        body = r.read().decode("utf-8")
+        c.close()
+        self.assertEqual(r.status, 200)
+        self.assertIn("text/html", ctype)
+        # Sanity: the page references the upload + listing endpoints.
+        self.assertIn("/upload", body)
+        self.assertIn("/api/files", body)
+
+
 class DownloadTests(ServerTestCase):
     def test_downloads_exact_content(self):
         payload = os.urandom(server.CHUNK * 2 + 7)

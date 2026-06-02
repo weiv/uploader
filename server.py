@@ -7,6 +7,107 @@ from urllib.parse import urlparse, parse_qs, unquote
 CHUNK = 64 * 1024
 
 UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "/srv/uploader/files")
+HOST = "127.0.0.1"
+PORT = int(os.environ.get("PORT", "8000"))
+
+PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Uploader</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
+  #drop { border: 2px dashed #999; border-radius: 8px; padding: 2rem; text-align: center; color: #555; }
+  #drop.over { border-color: #333; background: #f5f5f5; }
+  progress { width: 100%; display: none; margin-top: 1rem; }
+  ul { list-style: none; padding: 0; }
+  li { display: flex; justify-content: space-between; padding: .4rem 0; border-bottom: 1px solid #eee; }
+  .size { color: #888; font-variant-numeric: tabular-nums; }
+  #err { color: #b00; min-height: 1.2em; }
+</style>
+</head>
+<body>
+<h1>Uploader</h1>
+<div id="drop">Drop files here or <input type="file" id="file" multiple></div>
+<progress id="bar" max="100" value="0"></progress>
+<div id="err"></div>
+<h2>Files</h2>
+<ul id="list"></ul>
+<script>
+const drop = document.getElementById('drop');
+const fileInput = document.getElementById('file');
+const bar = document.getElementById('bar');
+const err = document.getElementById('err');
+const list = document.getElementById('list');
+
+function human(n) {
+  const u = ['B','KB','MB','GB','TB'];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i === 0 ? n : n.toFixed(1)) + ' ' + u[i];
+}
+
+async function refresh() {
+  const res = await fetch('/api/files');
+  const files = await res.json();
+  list.innerHTML = '';
+  for (const f of files) {
+    const li = document.createElement('li');
+    const a = document.createElement('a');
+    a.href = '/download/' + encodeURIComponent(f.name);
+    a.textContent = f.name;
+    const span = document.createElement('span');
+    span.className = 'size';
+    span.textContent = human(f.size);
+    li.append(a, span);
+    list.append(li);
+  }
+}
+
+function uploadOne(file) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', '/upload?name=' + encodeURIComponent(file.name));
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) bar.value = (e.loaded / e.total) * 100;
+    };
+    xhr.onload = () => (xhr.status === 201 ? resolve() : reject(new Error(xhr.responseText || xhr.status)));
+    xhr.onerror = () => reject(new Error('network error'));
+    xhr.send(file);
+  });
+}
+
+async function uploadAll(files) {
+  err.textContent = '';
+  bar.style.display = 'block';
+  try {
+    for (const file of files) {
+      bar.value = 0;
+      await uploadOne(file);
+    }
+    await refresh();
+  } catch (e) {
+    err.textContent = 'Upload failed: ' + e.message;
+  } finally {
+    bar.style.display = 'none';
+  }
+}
+
+fileInput.addEventListener('change', () => uploadAll(fileInput.files));
+drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+drop.addEventListener('drop', (e) => {
+  e.preventDefault();
+  drop.classList.remove('over');
+  uploadAll(e.dataTransfer.files);
+});
+
+refresh();
+</script>
+</body>
+</html>
+"""
 
 
 def sanitize_name(raw):
@@ -98,7 +199,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
-        if parsed.path == "/api/files":
+        if parsed.path == "/":
+            body = PAGE.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif parsed.path == "/api/files":
             self._send_json(200, list_files(UPLOAD_DIR))
         elif parsed.path.startswith("/download/"):
             self._serve_download(parsed.path[len("/download/"):])
@@ -173,3 +281,20 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self._send_json(201, {"name": os.path.basename(final_path)})
+
+
+def main():
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    from http.server import ThreadingHTTPServer
+    httpd = ThreadingHTTPServer((HOST, PORT), Handler)
+    print(f"Serving {UPLOAD_DIR} on http://{HOST}:{PORT}")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        httpd.server_close()
+
+
+if __name__ == "__main__":
+    main()
