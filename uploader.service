@@ -5,6 +5,7 @@ After=network.target
 [Service]
 User=uploader
 Group=uploader-admin
+Environment=PORT=57194
 UMask=002
 WorkingDirectory=/srv/uploader
 ExecStart=/usr/bin/python3 /srv/uploader/server.py

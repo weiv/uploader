@@ -1,6 +1,6 @@
 # Routing the Uploader through a Cloudflare Tunnel
 
-The uploader binds to `127.0.0.1:8000` and has **no authentication of its own**.
+The uploader binds to `127.0.0.1:57194` and has **no authentication of its own**.
 A Cloudflare Tunnel does two jobs for it:
 
 1. **Exposes** the server to the internet without opening any inbound port on the
@@ -21,7 +21,7 @@ A Cloudflare Tunnel does two jobs for it:
 
 - A domain managed in Cloudflare (using Cloudflare's nameservers). Free plan is fine.
 - The uploader installed and running on the Pi (`sudo ./setup.sh`; confirm with
-  `systemctl status uploader` and `curl -sf http://127.0.0.1:8000/ >/dev/null && echo ok`).
+  `systemctl status uploader` and `curl -sf http://127.0.0.1:57194/ >/dev/null && echo ok`).
 - A way to reach the Cloudflare dashboard / Zero Trust dashboard.
 
 Throughout, replace `files.example.com` with the hostname you want, and `example.com`
@@ -89,7 +89,7 @@ credentials-file: /home/weiv/.cloudflared/<TUNNEL-UUID>.json
 
 ingress:
   - hostname: files.example.com
-    service: http://127.0.0.1:8000
+    service: http://127.0.0.1:57194
   # Catch-all: everything else gets a 404. Required as the last rule.
   - service: http_status:404
 ```
@@ -259,7 +259,7 @@ this state.
 ```bash
 cloudflared tunnel login                         # one-time auth
 cloudflared tunnel create uploader               # make the tunnel
-# edit ~/.cloudflared/config.yml (ingress -> http://127.0.0.1:8000)
+# edit ~/.cloudflared/config.yml (ingress -> http://127.0.0.1:57194)
 cloudflared tunnel route dns uploader files.example.com   # add --overwrite-dns if it exists
 cloudflared tunnel ingress validate
 sudo cloudflared --config /home/weiv/.cloudflared/config.yml service install

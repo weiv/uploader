@@ -58,7 +58,7 @@ of its own**, so Access is mandatory — see the full walkthrough in
 
 For a quick test you can run an ephemeral tunnel:
 
-    cloudflared tunnel --url http://127.0.0.1:8000
+    cloudflared tunnel --url http://127.0.0.1:57194
 
 ⚠️ **Test only.** A quick tunnel gives a random `*.trycloudflare.com` URL with **no
 authentication** — it's an open, anonymous upload/download endpoint. Don't use it
@@ -69,12 +69,12 @@ For a persistent setup, use a named tunnel with an ingress rule in
 
     ingress:
       - hostname: files.example.com
-        service: http://127.0.0.1:8000
+        service: http://127.0.0.1:57194
       - service: http_status:404
 
 Then put a Cloudflare Access policy in front of `files.example.com` to require
 authentication. The app trusts that anyone who reaches it is already
-authenticated, so do **not** expose port 8000 directly.
+authenticated, so do **not** expose port 57194 directly.
 
 ## Administering it (as `weiv`)
 
@@ -93,7 +93,8 @@ authenticated, so do **not** expose port 8000 directly.
 - Name collisions auto-rename (`report.zip` → `report(1).zip`); nothing is
   overwritten.
 - Config via env vars: `UPLOAD_DIR` (default `/srv/uploader/files`), `PORT`
-  (default `8000`). The server always binds `127.0.0.1`.
+  (code default `8000`; the deployed `uploader.service` sets `PORT=57194`). The
+  server always binds `127.0.0.1`.
 - If you point `UPLOAD_DIR` at a directory outside `/srv/uploader/files`, you must
   also update `ReadWritePaths=` in `uploader.service` — `ProtectSystem=strict`
   makes everything else read-only, so writes will fail otherwise — and give the new

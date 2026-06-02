@@ -47,5 +47,5 @@ systemctl restart uploader.service
 echo "Done. Status:"
 systemctl --no-pager status uploader.service || true
 echo
-echo "Point your Cloudflare tunnel at http://127.0.0.1:8000"
+echo "Point your Cloudflare tunnel at http://127.0.0.1:57194"
 echo "Note: group changes take effect on the admin user's next login."
