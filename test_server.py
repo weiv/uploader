@@ -1,6 +1,11 @@
+import http.client
+import json
 import os
 import tempfile
+import threading
 import unittest
+from http.server import ThreadingHTTPServer
+
 import server
 
 
@@ -57,6 +62,59 @@ class UniquePathTests(unittest.TestCase):
         with mock.patch("os.path.exists", return_value=True):
             with self.assertRaises(RuntimeError):
                 server.unique_path(self.dir, "a.txt")
+
+
+class ServerTestCase(unittest.TestCase):
+    """Base: starts server.Handler against a temp dir on an ephemeral port."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self._orig_dir = server.UPLOAD_DIR
+        server.UPLOAD_DIR = self.dir
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        self.port = self.httpd.server_address[1]
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join()
+        server.UPLOAD_DIR = self._orig_dir
+
+    def conn(self):
+        return http.client.HTTPConnection("127.0.0.1", self.port)
+
+    def request(self, method, path, body=None, headers=None):
+        c = self.conn()
+        c.request(method, path, body=body, headers=headers or {})
+        r = c.getresponse()
+        data = r.read()
+        c.close()
+        return r.status, data
+
+
+class ListingTests(ServerTestCase):
+    def test_empty_listing(self):
+        status, data = self.request("GET", "/api/files")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(data), [])
+
+    def test_lists_files_newest_first_excluding_part(self):
+        # Create two real files plus a .part temp that must be hidden.
+        import time
+        with open(os.path.join(self.dir, "old.txt"), "w") as f:
+            f.write("old")
+        time.sleep(0.01)
+        with open(os.path.join(self.dir, "new.txt"), "w") as f:
+            f.write("newer")
+        open(os.path.join(self.dir, ".abc.part"), "w").close()
+        status, data = self.request("GET", "/api/files")
+        self.assertEqual(status, 200)
+        names = [e["name"] for e in json.loads(data)]
+        self.assertEqual(names, ["new.txt", "old.txt"])
+        sizes = {e["name"]: e["size"] for e in json.loads(data)}
+        self.assertEqual(sizes["new.txt"], 5)
 
 
 if __name__ == "__main__":

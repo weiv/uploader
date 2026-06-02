@@ -1,6 +1,11 @@
+import json
 import os
+from http.server import BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs, unquote
 
 CHUNK = 64 * 1024
+
+UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "/srv/uploader/files")
 
 
 def sanitize_name(raw):
@@ -37,3 +42,45 @@ def unique_path(directory, name):
         if not os.path.exists(candidate):
             return candidate
     raise RuntimeError("too many name collisions")
+
+
+def list_files(directory):
+    """Return file entries (name, size), newest mtime first, excluding .part."""
+    entries = []
+    for name in os.listdir(directory):
+        if name.endswith(".part"):
+            continue
+        path = os.path.join(directory, name)
+        if not os.path.isfile(path):
+            continue
+        st = os.stat(path)
+        entries.append({"name": name, "size": st.st_size, "_mtime": st.st_mtime})
+    entries.sort(key=lambda e: e["_mtime"], reverse=True)
+    for e in entries:
+        del e["_mtime"]
+    return entries
+
+
+class Handler(BaseHTTPRequestHandler):
+    def _send_json(self, status, obj):
+        body = json.dumps(obj).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_text(self, status, text):
+        body = text.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/files":
+            self._send_json(200, list_files(UPLOAD_DIR))
+        else:
+            self._send_text(404, "not found")
