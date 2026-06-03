@@ -191,6 +191,78 @@ class UploadTests(ServerTestCase):
         self.assertEqual(status, 400)
 
 
+class ChunkedUploadTests(ServerTestCase):
+    def _put_chunk(self, name, upload_id, chunk_index, total, payload):
+        url = (f"/upload?name={name}&upload_id={upload_id}"
+               f"&chunk={chunk_index}&total={total}")
+        c = self.conn()
+        c.request("PUT", url, body=payload,
+                  headers={"Content-Length": str(len(payload))})
+        r = c.getresponse()
+        data = r.read()
+        c.close()
+        try:
+            parsed = json.loads(data) if data else {}
+        except (json.JSONDecodeError, ValueError):
+            parsed = {}
+        return r.status, parsed
+
+    def test_assembles_two_chunks_correctly(self):
+        part0, part1 = os.urandom(200), os.urandom(150)
+        uid = "test-upload-abc123"
+        s0, _ = self._put_chunk("multi.bin", uid, 0, 2, part0)
+        self.assertEqual(s0, 200)
+        s1, d1 = self._put_chunk("multi.bin", uid, 1, 2, part1)
+        self.assertEqual(s1, 201)
+        self.assertEqual(d1["name"], "multi.bin")
+        with open(os.path.join(self.dir, "multi.bin"), "rb") as f:
+            self.assertEqual(f.read(), part0 + part1)
+
+    def test_single_chunk_behaves_like_full_upload(self):
+        uid = "test-upload-single"
+        status, data = self._put_chunk("file.txt", uid, 0, 1, b"hello")
+        self.assertEqual(status, 201)
+        self.assertEqual(data["name"], "file.txt")
+        with open(os.path.join(self.dir, "file.txt"), "rb") as f:
+            self.assertEqual(f.read(), b"hello")
+
+    def test_collision_autorenames(self):
+        open(os.path.join(self.dir, "dup.txt"), "w").close()
+        uid = "test-upload-dup"
+        status, data = self._put_chunk("dup.txt", uid, 0, 1, b"new")
+        self.assertEqual(status, 201)
+        self.assertEqual(data["name"], "dup(1).txt")
+
+    def test_no_part_files_left_behind(self):
+        uid = "test-upload-cleanup"
+        self._put_chunk("f.bin", uid, 0, 2, b"first")
+        self._put_chunk("f.bin", uid, 1, 2, b"second")
+        leftovers = [n for n in os.listdir(self.dir) if n.endswith(".part")]
+        self.assertEqual(leftovers, [])
+
+    def test_rejects_invalid_upload_id(self):
+        status, _ = self._put_chunk("f.bin", "../evil", 0, 1, b"x")
+        self.assertEqual(status, 400)
+
+    def test_rejects_invalid_chunk_params(self):
+        c = self.conn()
+        c.request("PUT", "/upload?name=f.bin&upload_id=abc123&chunk=abc&total=2",
+                  body=b"x", headers={"Content-Length": "1"})
+        r = c.getresponse()
+        status = r.status
+        r.read()
+        c.close()
+        self.assertEqual(status, 400)
+
+    def test_three_chunks_correct_order(self):
+        parts = [os.urandom(100), os.urandom(100), os.urandom(50)]
+        uid = "test-upload-three"
+        for i, part in enumerate(parts):
+            self._put_chunk("three.bin", uid, i, 3, part)
+        with open(os.path.join(self.dir, "three.bin"), "rb") as f:
+            self.assertEqual(f.read(), b"".join(parts))
+
+
 from urllib.parse import quote
 
 
