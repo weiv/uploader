@@ -9,6 +9,7 @@ CHUNK = 64 * 1024
 UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "/srv/uploader/files")
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("PORT", "8000"))
+VERSION = "1.1.0"
 
 PAGE = """<!DOCTYPE html>
 <html lang="en">
@@ -18,7 +19,7 @@ PAGE = """<!DOCTYPE html>
 <title>Uploader</title>
 <style>
   body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
-  #drop { border: 2px dashed #999; border-radius: 8px; padding: 2rem; text-align: center; color: #555; }
+  #drop { display: block; border: 2px dashed #999; border-radius: 8px; padding: 2rem; text-align: center; color: #555; cursor: pointer; }
   #drop.over { border-color: #333; background: #f5f5f5; }
   progress { width: 100%; display: none; margin-top: 1rem; }
   ul { list-style: none; padding: 0; }
@@ -26,23 +27,33 @@ PAGE = """<!DOCTYPE html>
   li a { overflow-wrap: anywhere; }
   .meta { display: flex; align-items: center; gap: .8rem; white-space: nowrap; }
   .time, .size { color: #888; font-variant-numeric: tabular-nums; }
-  button.copy, .res button { font: inherit; padding: .1rem .5rem; cursor: pointer; }
+  button.copy, .res button { font: inherit; padding: .2rem .6rem; cursor: pointer; min-height: 2rem; }
   #err { color: #b00; min-height: 1.2em; }
   #result { margin: 1rem 0; }
   .res { display: flex; align-items: center; gap: .5rem; padding: .3rem 0; }
   .res .ok { color: #2a7; white-space: nowrap; }
   .res .fail { color: #b00; }
   .res .url { flex: 1; min-width: 0; font-family: ui-monospace, monospace; font-size: .85em; padding: .2rem .4rem; }
+  footer { margin-top: 2rem; padding-top: .5rem; border-top: 1px solid #eee; color: #aaa; font-size: .8em; text-align: center; }
+  @media (max-width: 520px) {
+    body { margin: 1rem auto; }
+    li { flex-direction: column; align-items: flex-start; gap: .2rem; }
+    .meta { white-space: normal; gap: .6rem; }
+    .res { flex-wrap: wrap; }
+    .res .url { order: 2; min-width: 100%; margin-top: .2rem; }
+    .res button { order: 3; }
+  }
 </style>
 </head>
 <body>
 <h1>Uploader</h1>
-<div id="drop">Ovde baci datoteku ili <input type="file" id="file" multiple></div>
+<label id="drop">Ovde baci datoteku ili <input type="file" id="file" multiple></label>
 <progress id="bar" max="100" value="0"></progress>
 <div id="err"></div>
 <div id="result"></div>
 <h2>Files</h2>
 <ul id="list"></ul>
+<footer>v__VERSION__</footer>
 <script>
 const drop = document.getElementById('drop');
 const fileInput = document.getElementById('file');
@@ -364,7 +375,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/":
-            body = PAGE.encode("utf-8")
+            body = PAGE.replace("__VERSION__", VERSION).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
