@@ -1,6 +1,8 @@
 import json
 import os
+import subprocess
 import uuid
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, unquote
 
@@ -10,6 +12,22 @@ UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "/srv/uploader/files")
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("PORT", "8000"))
 VERSION = "1.1.0"
+
+
+def _commit_time():
+    try:
+        ts = subprocess.check_output(
+            ["git", "log", "-1", "--format=%ct"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
+        return dt.strftime("%Y-%m-%d %H:%M UTC")
+    except Exception:
+        return None
+
+
+BUILD_TIME = _commit_time()
 
 PAGE = """<!DOCTYPE html>
 <html lang="en">
@@ -375,7 +393,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/":
-            body = PAGE.replace("__VERSION__", VERSION).encode("utf-8")
+            ver = f"{VERSION} · {BUILD_TIME}" if BUILD_TIME else VERSION
+            body = PAGE.replace("__VERSION__", ver).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
