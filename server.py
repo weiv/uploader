@@ -288,24 +288,36 @@ def stream_body(reader, dst, remaining):
         remaining -= len(chunk)
 
 
-def list_files(directory):
-    """Return file entries (name, size, mtime), newest mtime first, excluding .part.
+UNSORTED = "(unsorted)"
 
-    `mtime` is integer epoch seconds; the client renders it in local time.
+
+def list_files(directory):
+    """Return file entries across uploader folders, newest mtime first.
+
+    Each entry is {uploader, name, size, mtime}. A file lives in
+    `directory/<uploader>/<name>`; files placed directly in `directory` (e.g.
+    dropped in by an admin) are grouped under '(unsorted)'. `mtime` is integer
+    epoch seconds; the client renders it in local time. Excludes .part temps.
     """
     entries = []
-    for name in os.listdir(directory):
-        if name.endswith(".part"):
-            continue
-        path = os.path.join(directory, name)
-        if not os.path.isfile(path):
-            continue
-        st = os.stat(path)
-        # Sort on full-precision mtime so sub-second-apart files order correctly;
-        # report it truncated to whole epoch seconds for the client.
-        entries.append(
-            {"name": name, "size": st.st_size, "mtime": st.st_mtime}
-        )
+    for entry in sorted(os.listdir(directory)):
+        path = os.path.join(directory, entry)
+        if os.path.isdir(path):
+            for name in os.listdir(path):
+                if name.endswith(".part"):
+                    continue
+                fpath = os.path.join(path, name)
+                if not os.path.isfile(fpath):
+                    continue
+                st = os.stat(fpath)
+                entries.append({"uploader": entry, "name": name,
+                                "size": st.st_size, "mtime": st.st_mtime})
+        elif os.path.isfile(path) and not entry.endswith(".part"):
+            st = os.stat(path)
+            entries.append({"uploader": UNSORTED, "name": entry,
+                            "size": st.st_size, "mtime": st.st_mtime})
+    # Sort on full-precision mtime so sub-second-apart files order correctly;
+    # report it truncated to whole epoch seconds for the client.
     entries.sort(key=lambda e: e["mtime"], reverse=True)
     for e in entries:
         e["mtime"] = int(e["mtime"])

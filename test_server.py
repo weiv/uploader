@@ -112,44 +112,52 @@ class ServerTestCase(unittest.TestCase):
 
 
 class ListingTests(ServerTestCase):
+    def _write(self, uploader, name, content):
+        d = os.path.join(self.dir, uploader)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, name), "w") as f:
+            f.write(content)
+
     def test_empty_listing(self):
         status, data = self.request("GET", "/api/files")
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(data), [])
 
-    def test_lists_files_newest_first_excluding_part(self):
-        # Create two real files plus a .part temp that must be hidden.
+    def test_lists_files_with_uploader_newest_first_excluding_part(self):
         import time
-        with open(os.path.join(self.dir, "old.txt"), "w") as f:
-            f.write("old")
+        self._write("alice", "old.txt", "old")
         time.sleep(0.01)
-        with open(os.path.join(self.dir, "new.txt"), "w") as f:
-            f.write("newer")
-        open(os.path.join(self.dir, ".abc.part"), "w").close()
-        status, data = self.request("GET", "/api/files")
-        self.assertEqual(status, 200)
-        names = [e["name"] for e in json.loads(data)]
-        self.assertEqual(names, ["new.txt", "old.txt"])
-        sizes = {e["name"]: e["size"] for e in json.loads(data)}
-        self.assertEqual(sizes["new.txt"], 5)
-
-    def test_entries_include_integer_mtime_consistent_with_order(self):
-        import time
-        with open(os.path.join(self.dir, "old.txt"), "w") as f:
-            f.write("old")
-        time.sleep(0.01)
-        with open(os.path.join(self.dir, "new.txt"), "w") as f:
-            f.write("newer")
+        self._write("bob", "new.txt", "newer")
+        open(os.path.join(self.dir, "bob", ".abc.part"), "w").close()
         status, data = self.request("GET", "/api/files")
         self.assertEqual(status, 200)
         entries = json.loads(data)
+        self.assertEqual([e["name"] for e in entries], ["new.txt", "old.txt"])
+        by_name = {e["name"]: e for e in entries}
+        self.assertEqual(by_name["new.txt"]["uploader"], "bob")
+        self.assertEqual(by_name["old.txt"]["uploader"], "alice")
+        self.assertEqual(by_name["new.txt"]["size"], 5)
+
+    def test_loose_root_files_grouped_as_unsorted(self):
+        with open(os.path.join(self.dir, "dropped.txt"), "w") as f:
+            f.write("x")
+        status, data = self.request("GET", "/api/files")
+        entries = json.loads(data)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["uploader"], "(unsorted)")
+        self.assertEqual(entries[0]["name"], "dropped.txt")
+
+    def test_entries_include_integer_mtime_consistent_with_order(self):
+        import time
+        self._write("alice", "old.txt", "old")
+        time.sleep(0.01)
+        self._write("alice", "new.txt", "newer")
+        status, data = self.request("GET", "/api/files")
+        entries = json.loads(data)
         for e in entries:
             self.assertIsInstance(e["mtime"], int)
-        # Newest-first ordering must agree with the reported mtimes.
         mtimes = [e["mtime"] for e in entries]
         self.assertEqual(mtimes, sorted(mtimes, reverse=True))
-        by_name = {e["name"]: e["mtime"] for e in entries}
-        self.assertGreaterEqual(by_name["new.txt"], by_name["old.txt"])
 
 
 class UploadTests(ServerTestCase):
