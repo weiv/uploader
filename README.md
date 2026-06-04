@@ -99,3 +99,11 @@ authenticated, so do **not** expose port 57194 directly.
   also update `ReadWritePaths=` in `uploader.service` — `ProtectSystem=strict`
   makes everything else read-only, so writes will fail otherwise — and give the new
   directory the same `uploader:uploader-admin` owner and `2775` mode.
+
+### Who uploaded what
+
+Each file is stored under a folder named for the uploader (the part before `@` in
+the email Cloudflare Access provides), and the file list groups files by uploader.
+Because attribution is the folder a file lives in, deleting files by hand never
+leaves stale records behind. Files placed directly in the upload directory by hand
+appear under **(unsorted)**.

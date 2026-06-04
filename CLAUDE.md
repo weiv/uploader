@@ -59,9 +59,9 @@ bound to `127.0.0.1` (the tunnel connects locally). Four endpoints:
 | Method & path             | Purpose |
 |---------------------------|---------|
 | `GET /`                   | One inline HTML page (no external assets): drag-drop upload + file list. |
-| `GET /api/files`          | JSON `[{name, size}]`, newest-mtime-first, excluding `.part` temp files. |
-| `GET /download/<name>`    | Streams the file in 64 KB chunks with `Content-Disposition: attachment`. |
-| `PUT /upload?name=<name>` | Streams the raw request body to disk in 64 KB windows. |
+| `GET /api/files`          | JSON `[{uploader, name, size, mtime}]`, newest-mtime-first, excluding `.part`; one entry per file across all uploader folders. |
+| `GET /download/<handle>/<name>` | Streams the file in 64 KB chunks with `Content-Disposition: attachment`. One-segment `/download/<name>` serves loose root files. |
+| `PUT /upload?name=<name>` | Streams the raw body into `UPLOAD_DIR/<handle>/`, where `<handle>` comes from the `Cf-Access-Authenticated-User-Email` header. |
 
 The filename/config helpers (`sanitize_name`, `unique_path`, `stream_body`) are
 **module-level functions** so tests exercise them directly without HTTP.
@@ -83,6 +83,14 @@ The filename/config helpers (`sanitize_name`, `unique_path`, `stream_body`) are
 - **Filename safety.** `sanitize_name` = `os.path.basename` of the stripped input, rejecting
   empty / `.` / `..` / anything still containing a separator → keeps all transfers inside
   `UPLOAD_DIR`. Applied to **both** upload and download.
+- **Per-uploader folders.** Each upload is filed under `UPLOAD_DIR/<handle>/`, where
+  `<handle>` is the sanitized local part of the `Cf-Access-Authenticated-User-Email`
+  header injected by the Cloudflare tunnel (`unknown` when absent, e.g. local dev).
+  This attributes files by *location*, so manual deletion never leaves stale
+  metadata. The header is trusted because the server binds `127.0.0.1` only — nothing
+  reaches it without passing Cloudflare Access. `.part` temps and collision
+  auto-renaming are per-folder. Files dropped directly in `UPLOAD_DIR` list under
+  `(unsorted)`.
 
 ### Deployment coupling
 

@@ -31,6 +31,23 @@ class SanitizeNameTests(unittest.TestCase):
                 server.sanitize_name(bad)
 
 
+class HandleFromEmailTests(unittest.TestCase):
+    def test_uses_local_part(self):
+        self.assertEqual(server.handle_from_email("alice@acme.com"), "alice")
+
+    def test_keeps_dots_in_local_part(self):
+        self.assertEqual(server.handle_from_email("v.weinstein@corp.com"), "v.weinstein")
+
+    def test_missing_email_is_unknown(self):
+        self.assertEqual(server.handle_from_email(None), "unknown")
+        self.assertEqual(server.handle_from_email(""), "unknown")
+
+    def test_unusable_local_part_is_unknown(self):
+        # No local part, or a local part that sanitizes to nothing usable.
+        self.assertEqual(server.handle_from_email("@acme.com"), "unknown")
+        self.assertEqual(server.handle_from_email("   @acme.com"), "unknown")
+
+
 class UniquePathTests(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
@@ -95,51 +112,61 @@ class ServerTestCase(unittest.TestCase):
 
 
 class ListingTests(ServerTestCase):
+    def _write(self, uploader, name, content):
+        d = os.path.join(self.dir, uploader)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, name), "w") as f:
+            f.write(content)
+
     def test_empty_listing(self):
         status, data = self.request("GET", "/api/files")
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(data), [])
 
-    def test_lists_files_newest_first_excluding_part(self):
-        # Create two real files plus a .part temp that must be hidden.
+    def test_lists_files_with_uploader_newest_first_excluding_part(self):
         import time
-        with open(os.path.join(self.dir, "old.txt"), "w") as f:
-            f.write("old")
+        self._write("alice", "old.txt", "old")
         time.sleep(0.01)
-        with open(os.path.join(self.dir, "new.txt"), "w") as f:
-            f.write("newer")
-        open(os.path.join(self.dir, ".abc.part"), "w").close()
-        status, data = self.request("GET", "/api/files")
-        self.assertEqual(status, 200)
-        names = [e["name"] for e in json.loads(data)]
-        self.assertEqual(names, ["new.txt", "old.txt"])
-        sizes = {e["name"]: e["size"] for e in json.loads(data)}
-        self.assertEqual(sizes["new.txt"], 5)
-
-    def test_entries_include_integer_mtime_consistent_with_order(self):
-        import time
-        with open(os.path.join(self.dir, "old.txt"), "w") as f:
-            f.write("old")
-        time.sleep(0.01)
-        with open(os.path.join(self.dir, "new.txt"), "w") as f:
-            f.write("newer")
+        self._write("bob", "new.txt", "newer")
+        open(os.path.join(self.dir, "bob", ".abc.part"), "w").close()
         status, data = self.request("GET", "/api/files")
         self.assertEqual(status, 200)
         entries = json.loads(data)
+        self.assertEqual([e["name"] for e in entries], ["new.txt", "old.txt"])
+        by_name = {e["name"]: e for e in entries}
+        self.assertEqual(by_name["new.txt"]["uploader"], "bob")
+        self.assertEqual(by_name["old.txt"]["uploader"], "alice")
+        self.assertEqual(by_name["new.txt"]["size"], 5)
+
+    def test_loose_root_files_grouped_as_unsorted(self):
+        with open(os.path.join(self.dir, "dropped.txt"), "w") as f:
+            f.write("x")
+        status, data = self.request("GET", "/api/files")
+        entries = json.loads(data)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["uploader"], "(unsorted)")
+        self.assertEqual(entries[0]["name"], "dropped.txt")
+
+    def test_entries_include_integer_mtime_consistent_with_order(self):
+        import time
+        self._write("alice", "old.txt", "old")
+        time.sleep(0.01)
+        self._write("alice", "new.txt", "newer")
+        status, data = self.request("GET", "/api/files")
+        entries = json.loads(data)
         for e in entries:
             self.assertIsInstance(e["mtime"], int)
-        # Newest-first ordering must agree with the reported mtimes.
         mtimes = [e["mtime"] for e in entries]
         self.assertEqual(mtimes, sorted(mtimes, reverse=True))
-        by_name = {e["name"]: e["mtime"] for e in entries}
-        self.assertGreaterEqual(by_name["new.txt"], by_name["old.txt"])
 
 
 class UploadTests(ServerTestCase):
-    def _put(self, name, payload):
+    def _put(self, name, payload, headers=None):
         c = self.conn()
-        headers = {"Content-Length": str(len(payload))}
-        c.request("PUT", "/upload?name=" + name, body=payload, headers=headers)
+        hdrs = {"Content-Length": str(len(payload))}
+        if headers:
+            hdrs.update(headers)
+        c.request("PUT", "/upload?name=" + name, body=payload, headers=hdrs)
         r = c.getresponse()
         data = r.read()
         c.close()
@@ -148,15 +175,17 @@ class UploadTests(ServerTestCase):
     def test_round_trips_bytes(self):
         status, data = self._put("hello.txt", b"hello world")
         self.assertEqual(status, 201)
-        self.assertEqual(json.loads(data)["name"], "hello.txt")
-        with open(os.path.join(self.dir, "hello.txt"), "rb") as f:
+        body = json.loads(data)
+        self.assertEqual(body["name"], "hello.txt")
+        self.assertEqual(body["uploader"], "unknown")
+        with open(os.path.join(self.dir, "unknown", "hello.txt"), "rb") as f:
             self.assertEqual(f.read(), b"hello world")
 
     def test_multi_chunk_payload(self):
         payload = os.urandom(server.CHUNK * 3 + 123)
         status, data = self._put("big.bin", payload)
         self.assertEqual(status, 201)
-        with open(os.path.join(self.dir, "big.bin"), "rb") as f:
+        with open(os.path.join(self.dir, "unknown", "big.bin"), "rb") as f:
             self.assertEqual(f.read(), payload)
 
     def test_collision_autorenames_and_reports(self):
@@ -164,13 +193,34 @@ class UploadTests(ServerTestCase):
         status, data = self._put("a.txt", b"second")
         self.assertEqual(status, 201)
         self.assertEqual(json.loads(data)["name"], "a(1).txt")
-        with open(os.path.join(self.dir, "a(1).txt"), "rb") as f:
+        with open(os.path.join(self.dir, "unknown", "a(1).txt"), "rb") as f:
             self.assertEqual(f.read(), b"second")
 
     def test_no_part_files_left_behind(self):
         self._put("a.txt", b"x")
-        leftovers = [n for n in os.listdir(self.dir) if n.endswith(".part")]
+        handle_dir = os.path.join(self.dir, "unknown")
+        leftovers = [n for n in os.listdir(handle_dir) if n.endswith(".part")]
         self.assertEqual(leftovers, [])
+
+    def test_uses_handle_from_access_header(self):
+        status, data = self._put(
+            "report.zip", b"data",
+            headers={"Cf-Access-Authenticated-User-Email": "alice@acme.com"},
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(json.loads(data)["uploader"], "alice")
+        with open(os.path.join(self.dir, "alice", "report.zip"), "rb") as f:
+            self.assertEqual(f.read(), b"data")
+
+    def test_same_name_different_handles_coexist(self):
+        self._put("report.zip", b"A",
+                  headers={"Cf-Access-Authenticated-User-Email": "alice@acme.com"})
+        self._put("report.zip", b"B",
+                  headers={"Cf-Access-Authenticated-User-Email": "bob@acme.com"})
+        with open(os.path.join(self.dir, "alice", "report.zip"), "rb") as f:
+            self.assertEqual(f.read(), b"A")
+        with open(os.path.join(self.dir, "bob", "report.zip"), "rb") as f:
+            self.assertEqual(f.read(), b"B")
 
     def test_rejects_bad_name(self):
         status, _ = self._put("..", b"x")
@@ -204,9 +254,11 @@ class PageTests(ServerTestCase):
         c.close()
         self.assertEqual(r.status, 200)
         self.assertIn("text/html", ctype)
-        # Sanity: the page references the upload + listing endpoints.
         self.assertIn("/upload", body)
         self.assertIn("/api/files", body)
+        # The page groups by uploader and links unsorted files without a handle.
+        self.assertIn("uploader", body)
+        self.assertIn("(unsorted)", body)
 
 
 class DownloadTests(ServerTestCase):
@@ -225,6 +277,21 @@ class DownloadTests(ServerTestCase):
     def test_rejects_traversal(self):
         status, _ = self.request("GET", "/download/" + quote("../server.py"))
         self.assertIn(status, (400, 404))
+
+    def test_downloads_from_uploader_folder(self):
+        payload = os.urandom(server.CHUNK + 5)
+        d = os.path.join(self.dir, "alice")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "report.zip"), "wb") as f:
+            f.write(payload)
+        status, data = self.request("GET", "/download/alice/report.zip")
+        self.assertEqual(status, 200)
+        self.assertEqual(data, payload)
+
+    def test_missing_file_in_folder_404(self):
+        os.makedirs(os.path.join(self.dir, "alice"), exist_ok=True)
+        status, _ = self.request("GET", "/download/alice/nope.zip")
+        self.assertEqual(status, 404)
 
     def test_sets_attachment_header(self):
         with open(os.path.join(self.dir, "f.txt"), "w") as f:

@@ -21,7 +21,8 @@ PAGE = """<!DOCTYPE html>
   #drop { border: 2px dashed #999; border-radius: 8px; padding: 2rem; text-align: center; color: #555; }
   #drop.over { border-color: #333; background: #f5f5f5; }
   progress { width: 100%; display: none; margin-top: 1rem; }
-  ul { list-style: none; padding: 0; }
+  ul { list-style: none; padding: 0; margin: 0 0 1rem; }
+  h3.uploader { margin: 1rem 0 .3rem; font-size: 1rem; color: #333; border-bottom: 2px solid #ddd; padding-bottom: .2rem; }
   li { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: .4rem 0; border-bottom: 1px solid #eee; }
   li a { overflow-wrap: anywhere; }
   .meta { display: flex; align-items: center; gap: .8rem; white-space: nowrap; }
@@ -42,7 +43,7 @@ PAGE = """<!DOCTYPE html>
 <div id="err"></div>
 <div id="result"></div>
 <h2>Files</h2>
-<ul id="list"></ul>
+<div id="list"></div>
 <script>
 const drop = document.getElementById('drop');
 const fileInput = document.getElementById('file');
@@ -63,10 +64,14 @@ function fmtTime(s) {
   return new Date(s * 1000).toLocaleString();
 }
 
-function dlUrl(name) {
-  // location.origin -> the public tunnel URL when reached through Cloudflare,
-  // 127.0.0.1 locally; so the copied link is always correct for the viewer.
-  return location.origin + '/download/' + encodeURIComponent(name);
+function dlUrl(uploader, name) {
+  // location.origin -> the public tunnel URL through Cloudflare, 127.0.0.1
+  // locally, so the copied link is always correct for the viewer. Unsorted
+  // (root) files have no handle segment.
+  const base = location.origin + '/download/';
+  return uploader === '(unsorted)'
+    ? base + encodeURIComponent(name)
+    : base + encodeURIComponent(uploader) + '/' + encodeURIComponent(name);
 }
 
 async function copy(text, btn) {
@@ -88,12 +93,12 @@ async function copy(text, btn) {
   setTimeout(() => { btn.textContent = old; }, 1200);
 }
 
-function copyButton(name, cls) {
+function copyButton(uploader, name, cls) {
   const btn = document.createElement('button');
   btn.type = 'button';
   if (cls) btn.className = cls;
   btn.textContent = 'Copy';
-  btn.addEventListener('click', () => copy(dlUrl(name), btn));
+  btn.addEventListener('click', () => copy(dlUrl(uploader, name), btn));
   return btn;
 }
 
@@ -102,26 +107,40 @@ async function refresh() {
   if (!res.ok) throw new Error('file list HTTP ' + res.status);
   const files = await res.json();
   list.innerHTML = '';
+  // Partition by uploader, preserving the newest-first order within each group.
+  const groups = new Map();
   for (const f of files) {
-    const li = document.createElement('li');
-    const a = document.createElement('a');
-    a.href = '/download/' + encodeURIComponent(f.name);
-    a.textContent = f.name;
-    const meta = document.createElement('span');
-    meta.className = 'meta';
-    const time = document.createElement('span');
-    time.className = 'time';
-    time.textContent = fmtTime(f.mtime);
-    const size = document.createElement('span');
-    size.className = 'size';
-    size.textContent = human(f.size);
-    meta.append(time, size, copyButton(f.name, 'copy'));
-    li.append(a, meta);
-    list.append(li);
+    if (!groups.has(f.uploader)) groups.set(f.uploader, []);
+    groups.get(f.uploader).push(f);
+  }
+  for (const [uploader, items] of groups) {
+    const head = document.createElement('h3');
+    head.className = 'uploader';
+    head.textContent = uploader;
+    list.append(head);
+    const ul = document.createElement('ul');
+    for (const f of items) {
+      const li = document.createElement('li');
+      const a = document.createElement('a');
+      a.href = dlUrl(f.uploader, f.name);
+      a.textContent = f.name;
+      const meta = document.createElement('span');
+      meta.className = 'meta';
+      const time = document.createElement('span');
+      time.className = 'time';
+      time.textContent = fmtTime(f.mtime);
+      const size = document.createElement('span');
+      size.className = 'size';
+      size.textContent = human(f.size);
+      meta.append(time, size, copyButton(f.uploader, f.name, 'copy'));
+      li.append(a, meta);
+      ul.append(li);
+    }
+    list.append(ul);
   }
 }
 
-function addResult(name, ok, detail) {
+function addResult(name, uploader, ok, detail) {
   const row = document.createElement('div');
   row.className = 'res';
   const label = document.createElement('span');
@@ -132,9 +151,9 @@ function addResult(name, ok, detail) {
     url.className = 'url';
     url.type = 'text';
     url.readOnly = true;
-    url.value = dlUrl(name);
+    url.value = dlUrl(uploader, name);
     url.addEventListener('focus', () => url.select());
-    row.append(label, url, copyButton(name));
+    row.append(label, url, copyButton(uploader, name));
   } else {
     label.className = 'fail';
     label.textContent = '✗ ' + name + ' — ' + detail;
@@ -162,10 +181,14 @@ function uploadOne(file) {
     };
     xhr.onload = () => {
       if (xhr.status === 201) {
-        // Server returns the final saved name (post-collision, e.g. a(1).txt).
-        let name = file.name;
-        try { name = JSON.parse(xhr.responseText).name; } catch (e) {}
-        resolve({ ok: true, name });
+        // Server returns the final saved name (post-collision) and the handle
+        // the file was filed under, so the result link is built correctly.
+        let name = file.name, uploader = '';
+        try {
+          const r = JSON.parse(xhr.responseText);
+          name = r.name; uploader = r.uploader;
+        } catch (e) {}
+        resolve({ ok: true, name, uploader });
       } else {
         resolve({ ok: false, name: file.name, detail: errorDetail(xhr) });
       }
@@ -186,7 +209,7 @@ async function uploadAll(files) {
       const r = await uploadOne(file);
       // Report each file immediately, with its copy link taken straight from
       // the upload response — independent of the list refresh below.
-      addResult(r.name, r.ok, r.detail);
+      addResult(r.name, r.uploader, r.ok, r.detail);
       if (r.ok) anyOk = true;
     }
   } finally {
@@ -238,6 +261,22 @@ def sanitize_name(raw):
     return name
 
 
+def handle_from_email(email):
+    """Derive a safe per-uploader folder handle from a Cloudflare Access email.
+
+    Uses the local part (text before '@'), run through sanitize_name. Falls back
+    to 'unknown' for a missing, blank, or unusable value so uploads always land
+    somewhere (e.g. local dev runs with no Cloudflare header).
+    """
+    if not email:
+        return "unknown"
+    local = email.split("@", 1)[0]
+    try:
+        return sanitize_name(local)
+    except ValueError:
+        return "unknown"
+
+
 def unique_path(directory, name):
     """Return an absolute path in `directory` for `name` that does not exist.
 
@@ -272,24 +311,36 @@ def stream_body(reader, dst, remaining):
         remaining -= len(chunk)
 
 
-def list_files(directory):
-    """Return file entries (name, size, mtime), newest mtime first, excluding .part.
+UNSORTED = "(unsorted)"
 
-    `mtime` is integer epoch seconds; the client renders it in local time.
+
+def list_files(directory):
+    """Return file entries across uploader folders, newest mtime first.
+
+    Each entry is {uploader, name, size, mtime}. A file lives in
+    `directory/<uploader>/<name>`; files placed directly in `directory` (e.g.
+    dropped in by an admin) are grouped under '(unsorted)'. `mtime` is integer
+    epoch seconds; the client renders it in local time. Excludes .part temps.
     """
     entries = []
-    for name in os.listdir(directory):
-        if name.endswith(".part"):
-            continue
-        path = os.path.join(directory, name)
-        if not os.path.isfile(path):
-            continue
-        st = os.stat(path)
-        # Sort on full-precision mtime so sub-second-apart files order correctly;
-        # report it truncated to whole epoch seconds for the client.
-        entries.append(
-            {"name": name, "size": st.st_size, "mtime": st.st_mtime}
-        )
+    for entry in sorted(os.listdir(directory)):
+        path = os.path.join(directory, entry)
+        if os.path.isdir(path):
+            for name in os.listdir(path):
+                if name.endswith(".part"):
+                    continue
+                fpath = os.path.join(path, name)
+                if not os.path.isfile(fpath):
+                    continue
+                st = os.stat(fpath)
+                entries.append({"uploader": entry, "name": name,
+                                "size": st.st_size, "mtime": st.st_mtime})
+        elif os.path.isfile(path) and not entry.endswith(".part"):
+            st = os.stat(path)
+            entries.append({"uploader": UNSORTED, "name": entry,
+                            "size": st.st_size, "mtime": st.st_mtime})
+    # Sort on full-precision mtime so sub-second-apart files order correctly;
+    # report it truncated to whole epoch seconds for the client.
     entries.sort(key=lambda e: e["mtime"], reverse=True)
     for e in entries:
         e["mtime"] = int(e["mtime"])
@@ -329,13 +380,24 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._send_text(404, "not found")
 
-    def _serve_download(self, raw_name):
+    def _serve_download(self, raw):
+        # `raw` is "<name>" (a loose root file) or "<handle>/<name>" (an
+        # uploader folder), each segment URL-encoded. Both segments are
+        # sanitized, so neither can escape UPLOAD_DIR.
+        parts = raw.split("/")
         try:
-            name = sanitize_name(unquote(raw_name))
+            if len(parts) == 1:
+                segments = [sanitize_name(unquote(parts[0]))]
+            elif len(parts) == 2:
+                segments = [sanitize_name(unquote(parts[0])),
+                            sanitize_name(unquote(parts[1]))]
+            else:
+                raise ValueError
         except ValueError:
             self._send_text(400, "invalid name")
             return
-        path = os.path.join(UPLOAD_DIR, name)
+        name = segments[-1]
+        path = os.path.join(UPLOAD_DIR, *segments)
         if not os.path.isfile(path):
             self._send_text(404, "not found")
             return
@@ -377,11 +439,17 @@ class Handler(BaseHTTPRequestHandler):
             self._send_text(400, "Content-Length required")
             return
 
-        tmp_path = os.path.join(UPLOAD_DIR, f".{uuid.uuid4().hex}.part")
+        handle = handle_from_email(
+            self.headers.get("Cf-Access-Authenticated-User-Email")
+        )
+        handle_dir = os.path.join(UPLOAD_DIR, handle)
+        os.makedirs(handle_dir, exist_ok=True)
+
+        tmp_path = os.path.join(handle_dir, f".{uuid.uuid4().hex}.part")
         try:
             with open(tmp_path, "wb") as f:
                 stream_body(self.rfile, f, remaining)
-            final_path = unique_path(UPLOAD_DIR, name)
+            final_path = unique_path(handle_dir, name)
             os.rename(tmp_path, final_path)
         except IncompleteUpload:
             # Client fault: fewer bytes than promised.
@@ -396,7 +464,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_text(500, "upload failed")
             return
 
-        self._send_json(201, {"name": os.path.basename(final_path)})
+        self._send_json(201, {"name": os.path.basename(final_path), "uploader": handle})
 
 
 def main():
