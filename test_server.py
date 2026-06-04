@@ -31,6 +31,23 @@ class SanitizeNameTests(unittest.TestCase):
                 server.sanitize_name(bad)
 
 
+class HandleFromEmailTests(unittest.TestCase):
+    def test_uses_local_part(self):
+        self.assertEqual(server.handle_from_email("alice@acme.com"), "alice")
+
+    def test_keeps_dots_in_local_part(self):
+        self.assertEqual(server.handle_from_email("v.weinstein@corp.com"), "v.weinstein")
+
+    def test_missing_email_is_unknown(self):
+        self.assertEqual(server.handle_from_email(None), "unknown")
+        self.assertEqual(server.handle_from_email(""), "unknown")
+
+    def test_unusable_local_part_is_unknown(self):
+        # No local part, or a local part that sanitizes to nothing usable.
+        self.assertEqual(server.handle_from_email("@acme.com"), "unknown")
+        self.assertEqual(server.handle_from_email("   @acme.com"), "unknown")
+
+
 class UniquePathTests(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()

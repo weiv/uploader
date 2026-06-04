@@ -238,6 +238,22 @@ def sanitize_name(raw):
     return name
 
 
+def handle_from_email(email):
+    """Derive a safe per-uploader folder handle from a Cloudflare Access email.
+
+    Uses the local part (text before '@'), run through sanitize_name. Falls back
+    to 'unknown' for a missing, blank, or unusable value so uploads always land
+    somewhere (e.g. local dev runs with no Cloudflare header).
+    """
+    if not email:
+        return "unknown"
+    local = email.split("@", 1)[0]
+    try:
+        return sanitize_name(local)
+    except ValueError:
+        return "unknown"
+
+
 def unique_path(directory, name):
     """Return an absolute path in `directory` for `name` that does not exist.
 
