@@ -254,9 +254,11 @@ class PageTests(ServerTestCase):
         c.close()
         self.assertEqual(r.status, 200)
         self.assertIn("text/html", ctype)
-        # Sanity: the page references the upload + listing endpoints.
         self.assertIn("/upload", body)
         self.assertIn("/api/files", body)
+        # The page groups by uploader and links unsorted files without a handle.
+        self.assertIn("uploader", body)
+        self.assertIn("(unsorted)", body)
 
 
 class DownloadTests(ServerTestCase):

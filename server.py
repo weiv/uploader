@@ -21,7 +21,8 @@ PAGE = """<!DOCTYPE html>
   #drop { border: 2px dashed #999; border-radius: 8px; padding: 2rem; text-align: center; color: #555; }
   #drop.over { border-color: #333; background: #f5f5f5; }
   progress { width: 100%; display: none; margin-top: 1rem; }
-  ul { list-style: none; padding: 0; }
+  ul { list-style: none; padding: 0; margin: 0 0 1rem; }
+  h3.uploader { margin: 1rem 0 .3rem; font-size: 1rem; color: #333; border-bottom: 2px solid #ddd; padding-bottom: .2rem; }
   li { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: .4rem 0; border-bottom: 1px solid #eee; }
   li a { overflow-wrap: anywhere; }
   .meta { display: flex; align-items: center; gap: .8rem; white-space: nowrap; }
@@ -42,7 +43,7 @@ PAGE = """<!DOCTYPE html>
 <div id="err"></div>
 <div id="result"></div>
 <h2>Files</h2>
-<ul id="list"></ul>
+<div id="list"></div>
 <script>
 const drop = document.getElementById('drop');
 const fileInput = document.getElementById('file');
@@ -63,10 +64,14 @@ function fmtTime(s) {
   return new Date(s * 1000).toLocaleString();
 }
 
-function dlUrl(name) {
-  // location.origin -> the public tunnel URL when reached through Cloudflare,
-  // 127.0.0.1 locally; so the copied link is always correct for the viewer.
-  return location.origin + '/download/' + encodeURIComponent(name);
+function dlUrl(uploader, name) {
+  // location.origin -> the public tunnel URL through Cloudflare, 127.0.0.1
+  // locally, so the copied link is always correct for the viewer. Unsorted
+  // (root) files have no handle segment.
+  const base = location.origin + '/download/';
+  return uploader === '(unsorted)'
+    ? base + encodeURIComponent(name)
+    : base + encodeURIComponent(uploader) + '/' + encodeURIComponent(name);
 }
 
 async function copy(text, btn) {
@@ -88,12 +93,12 @@ async function copy(text, btn) {
   setTimeout(() => { btn.textContent = old; }, 1200);
 }
 
-function copyButton(name, cls) {
+function copyButton(uploader, name, cls) {
   const btn = document.createElement('button');
   btn.type = 'button';
   if (cls) btn.className = cls;
   btn.textContent = 'Copy';
-  btn.addEventListener('click', () => copy(dlUrl(name), btn));
+  btn.addEventListener('click', () => copy(dlUrl(uploader, name), btn));
   return btn;
 }
 
@@ -102,26 +107,40 @@ async function refresh() {
   if (!res.ok) throw new Error('file list HTTP ' + res.status);
   const files = await res.json();
   list.innerHTML = '';
+  // Partition by uploader, preserving the newest-first order within each group.
+  const groups = new Map();
   for (const f of files) {
-    const li = document.createElement('li');
-    const a = document.createElement('a');
-    a.href = '/download/' + encodeURIComponent(f.name);
-    a.textContent = f.name;
-    const meta = document.createElement('span');
-    meta.className = 'meta';
-    const time = document.createElement('span');
-    time.className = 'time';
-    time.textContent = fmtTime(f.mtime);
-    const size = document.createElement('span');
-    size.className = 'size';
-    size.textContent = human(f.size);
-    meta.append(time, size, copyButton(f.name, 'copy'));
-    li.append(a, meta);
-    list.append(li);
+    if (!groups.has(f.uploader)) groups.set(f.uploader, []);
+    groups.get(f.uploader).push(f);
+  }
+  for (const [uploader, items] of groups) {
+    const head = document.createElement('h3');
+    head.className = 'uploader';
+    head.textContent = uploader;
+    list.append(head);
+    const ul = document.createElement('ul');
+    for (const f of items) {
+      const li = document.createElement('li');
+      const a = document.createElement('a');
+      a.href = dlUrl(f.uploader, f.name);
+      a.textContent = f.name;
+      const meta = document.createElement('span');
+      meta.className = 'meta';
+      const time = document.createElement('span');
+      time.className = 'time';
+      time.textContent = fmtTime(f.mtime);
+      const size = document.createElement('span');
+      size.className = 'size';
+      size.textContent = human(f.size);
+      meta.append(time, size, copyButton(f.uploader, f.name, 'copy'));
+      li.append(a, meta);
+      ul.append(li);
+    }
+    list.append(ul);
   }
 }
 
-function addResult(name, ok, detail) {
+function addResult(name, uploader, ok, detail) {
   const row = document.createElement('div');
   row.className = 'res';
   const label = document.createElement('span');
@@ -132,9 +151,9 @@ function addResult(name, ok, detail) {
     url.className = 'url';
     url.type = 'text';
     url.readOnly = true;
-    url.value = dlUrl(name);
+    url.value = dlUrl(uploader, name);
     url.addEventListener('focus', () => url.select());
-    row.append(label, url, copyButton(name));
+    row.append(label, url, copyButton(uploader, name));
   } else {
     label.className = 'fail';
     label.textContent = '✗ ' + name + ' — ' + detail;
@@ -162,10 +181,14 @@ function uploadOne(file) {
     };
     xhr.onload = () => {
       if (xhr.status === 201) {
-        // Server returns the final saved name (post-collision, e.g. a(1).txt).
-        let name = file.name;
-        try { name = JSON.parse(xhr.responseText).name; } catch (e) {}
-        resolve({ ok: true, name });
+        // Server returns the final saved name (post-collision) and the handle
+        // the file was filed under, so the result link is built correctly.
+        let name = file.name, uploader = '';
+        try {
+          const r = JSON.parse(xhr.responseText);
+          name = r.name; uploader = r.uploader;
+        } catch (e) {}
+        resolve({ ok: true, name, uploader });
       } else {
         resolve({ ok: false, name: file.name, detail: errorDetail(xhr) });
       }
@@ -186,7 +209,7 @@ async function uploadAll(files) {
       const r = await uploadOne(file);
       // Report each file immediately, with its copy link taken straight from
       // the upload response — independent of the list refresh below.
-      addResult(r.name, r.ok, r.detail);
+      addResult(r.name, r.uploader, r.ok, r.detail);
       if (r.ok) anyOk = true;
     }
   } finally {
