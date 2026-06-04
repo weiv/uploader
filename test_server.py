@@ -153,10 +153,12 @@ class ListingTests(ServerTestCase):
 
 
 class UploadTests(ServerTestCase):
-    def _put(self, name, payload):
+    def _put(self, name, payload, headers=None):
         c = self.conn()
-        headers = {"Content-Length": str(len(payload))}
-        c.request("PUT", "/upload?name=" + name, body=payload, headers=headers)
+        hdrs = {"Content-Length": str(len(payload))}
+        if headers:
+            hdrs.update(headers)
+        c.request("PUT", "/upload?name=" + name, body=payload, headers=hdrs)
         r = c.getresponse()
         data = r.read()
         c.close()
@@ -165,15 +167,17 @@ class UploadTests(ServerTestCase):
     def test_round_trips_bytes(self):
         status, data = self._put("hello.txt", b"hello world")
         self.assertEqual(status, 201)
-        self.assertEqual(json.loads(data)["name"], "hello.txt")
-        with open(os.path.join(self.dir, "hello.txt"), "rb") as f:
+        body = json.loads(data)
+        self.assertEqual(body["name"], "hello.txt")
+        self.assertEqual(body["uploader"], "unknown")
+        with open(os.path.join(self.dir, "unknown", "hello.txt"), "rb") as f:
             self.assertEqual(f.read(), b"hello world")
 
     def test_multi_chunk_payload(self):
         payload = os.urandom(server.CHUNK * 3 + 123)
         status, data = self._put("big.bin", payload)
         self.assertEqual(status, 201)
-        with open(os.path.join(self.dir, "big.bin"), "rb") as f:
+        with open(os.path.join(self.dir, "unknown", "big.bin"), "rb") as f:
             self.assertEqual(f.read(), payload)
 
     def test_collision_autorenames_and_reports(self):
@@ -181,13 +185,34 @@ class UploadTests(ServerTestCase):
         status, data = self._put("a.txt", b"second")
         self.assertEqual(status, 201)
         self.assertEqual(json.loads(data)["name"], "a(1).txt")
-        with open(os.path.join(self.dir, "a(1).txt"), "rb") as f:
+        with open(os.path.join(self.dir, "unknown", "a(1).txt"), "rb") as f:
             self.assertEqual(f.read(), b"second")
 
     def test_no_part_files_left_behind(self):
         self._put("a.txt", b"x")
-        leftovers = [n for n in os.listdir(self.dir) if n.endswith(".part")]
+        handle_dir = os.path.join(self.dir, "unknown")
+        leftovers = [n for n in os.listdir(handle_dir) if n.endswith(".part")]
         self.assertEqual(leftovers, [])
+
+    def test_uses_handle_from_access_header(self):
+        status, data = self._put(
+            "report.zip", b"data",
+            headers={"Cf-Access-Authenticated-User-Email": "alice@acme.com"},
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(json.loads(data)["uploader"], "alice")
+        with open(os.path.join(self.dir, "alice", "report.zip"), "rb") as f:
+            self.assertEqual(f.read(), b"data")
+
+    def test_same_name_different_handles_coexist(self):
+        self._put("report.zip", b"A",
+                  headers={"Cf-Access-Authenticated-User-Email": "alice@acme.com"})
+        self._put("report.zip", b"B",
+                  headers={"Cf-Access-Authenticated-User-Email": "bob@acme.com"})
+        with open(os.path.join(self.dir, "alice", "report.zip"), "rb") as f:
+            self.assertEqual(f.read(), b"A")
+        with open(os.path.join(self.dir, "bob", "report.zip"), "rb") as f:
+            self.assertEqual(f.read(), b"B")
 
     def test_rejects_bad_name(self):
         status, _ = self._put("..", b"x")

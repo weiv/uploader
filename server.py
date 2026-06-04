@@ -393,11 +393,17 @@ class Handler(BaseHTTPRequestHandler):
             self._send_text(400, "Content-Length required")
             return
 
-        tmp_path = os.path.join(UPLOAD_DIR, f".{uuid.uuid4().hex}.part")
+        handle = handle_from_email(
+            self.headers.get("Cf-Access-Authenticated-User-Email")
+        )
+        handle_dir = os.path.join(UPLOAD_DIR, handle)
+        os.makedirs(handle_dir, exist_ok=True)
+
+        tmp_path = os.path.join(handle_dir, f".{uuid.uuid4().hex}.part")
         try:
             with open(tmp_path, "wb") as f:
                 stream_body(self.rfile, f, remaining)
-            final_path = unique_path(UPLOAD_DIR, name)
+            final_path = unique_path(handle_dir, name)
             os.rename(tmp_path, final_path)
         except IncompleteUpload:
             # Client fault: fewer bytes than promised.
@@ -412,7 +418,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_text(500, "upload failed")
             return
 
-        self._send_json(201, {"name": os.path.basename(final_path)})
+        self._send_json(201, {"name": os.path.basename(final_path), "uploader": handle})
 
 
 def main():
