@@ -276,6 +276,21 @@ class DownloadTests(ServerTestCase):
         status, _ = self.request("GET", "/download/" + quote("../server.py"))
         self.assertIn(status, (400, 404))
 
+    def test_downloads_from_uploader_folder(self):
+        payload = os.urandom(server.CHUNK + 5)
+        d = os.path.join(self.dir, "alice")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "report.zip"), "wb") as f:
+            f.write(payload)
+        status, data = self.request("GET", "/download/alice/report.zip")
+        self.assertEqual(status, 200)
+        self.assertEqual(data, payload)
+
+    def test_missing_file_in_folder_404(self):
+        os.makedirs(os.path.join(self.dir, "alice"), exist_ok=True)
+        status, _ = self.request("GET", "/download/alice/nope.zip")
+        self.assertEqual(status, 404)
+
     def test_sets_attachment_header(self):
         with open(os.path.join(self.dir, "f.txt"), "w") as f:
             f.write("hi")

@@ -357,13 +357,24 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._send_text(404, "not found")
 
-    def _serve_download(self, raw_name):
+    def _serve_download(self, raw):
+        # `raw` is "<name>" (a loose root file) or "<handle>/<name>" (an
+        # uploader folder), each segment URL-encoded. Both segments are
+        # sanitized, so neither can escape UPLOAD_DIR.
+        parts = raw.split("/")
         try:
-            name = sanitize_name(unquote(raw_name))
+            if len(parts) == 1:
+                segments = [sanitize_name(unquote(parts[0]))]
+            elif len(parts) == 2:
+                segments = [sanitize_name(unquote(parts[0])),
+                            sanitize_name(unquote(parts[1]))]
+            else:
+                raise ValueError
         except ValueError:
             self._send_text(400, "invalid name")
             return
-        path = os.path.join(UPLOAD_DIR, name)
+        name = segments[-1]
+        path = os.path.join(UPLOAD_DIR, *segments)
         if not os.path.isfile(path):
             self._send_text(404, "not found")
             return
