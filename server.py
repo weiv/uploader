@@ -1,6 +1,8 @@
 import json
 import os
+import subprocess
 import uuid
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, unquote
 
@@ -9,6 +11,23 @@ CHUNK = 64 * 1024
 UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "/srv/uploader/files")
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("PORT", "8000"))
+VERSION = "1.1.0"
+
+
+def _commit_time():
+    try:
+        ts = subprocess.check_output(
+            ["git", "log", "-1", "--format=%ct"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
+        return dt.strftime("%Y-%m-%d %H:%M UTC")
+    except Exception:
+        return None
+
+
+BUILD_TIME = _commit_time()
 
 PAGE = """<!DOCTYPE html>
 <html lang="en">
@@ -18,7 +37,7 @@ PAGE = """<!DOCTYPE html>
 <title>Uploader</title>
 <style>
   body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
-  #drop { border: 2px dashed #999; border-radius: 8px; padding: 2rem; text-align: center; color: #555; }
+  #drop { display: block; border: 2px dashed #999; border-radius: 8px; padding: 2rem; text-align: center; color: #555; cursor: pointer; }
   #drop.over { border-color: #333; background: #f5f5f5; }
   progress { width: 100%; display: none; margin-top: 1rem; }
   ul { list-style: none; padding: 0; margin: 0 0 1rem; }
@@ -27,23 +46,33 @@ PAGE = """<!DOCTYPE html>
   li a { overflow-wrap: anywhere; }
   .meta { display: flex; align-items: center; gap: .8rem; white-space: nowrap; }
   .time, .size { color: #888; font-variant-numeric: tabular-nums; }
-  button.copy, .res button { font: inherit; padding: .1rem .5rem; cursor: pointer; }
+  button.copy, .res button { font: inherit; padding: .2rem .6rem; cursor: pointer; min-height: 2rem; }
   #err { color: #b00; min-height: 1.2em; }
   #result { margin: 1rem 0; }
   .res { display: flex; align-items: center; gap: .5rem; padding: .3rem 0; }
   .res .ok { color: #2a7; white-space: nowrap; }
   .res .fail { color: #b00; }
   .res .url { flex: 1; min-width: 0; font-family: ui-monospace, monospace; font-size: .85em; padding: .2rem .4rem; }
+  footer { margin-top: 2rem; padding-top: .5rem; border-top: 1px solid #eee; color: #aaa; font-size: .8em; text-align: center; }
+  @media (max-width: 520px) {
+    body { margin: 1rem auto; }
+    li { flex-direction: column; align-items: flex-start; gap: .2rem; }
+    .meta { white-space: normal; gap: .6rem; }
+    .res { flex-wrap: wrap; }
+    .res .url { order: 2; min-width: 100%; margin-top: .2rem; }
+    .res button { order: 3; }
+  }
 </style>
 </head>
 <body>
 <h1>Uploader</h1>
-<div id="drop">Ovde baci datoteku ili <input type="file" id="file" multiple></div>
+<label id="drop">Ovde baci datoteku ili <input type="file" id="file" multiple></label>
 <progress id="bar" max="100" value="0"></progress>
 <div id="err"></div>
 <div id="result"></div>
 <h2>Files</h2>
 <div id="list"></div>
+<footer>v__VERSION__</footer>
 <script>
 const drop = document.getElementById('drop');
 const fileInput = document.getElementById('file');
@@ -162,15 +191,63 @@ function addResult(name, uploader, ok, detail) {
   result.append(row);
 }
 
+const UPLOAD_CHUNK_SIZE = 90 * 1024 * 1024; // 90 MB per chunk, safely under tunnel limit
+
+function generateUploadId() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)))
+    .map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 function errorDetail(xhr) {
-  if (xhr.status === 413) return 'too large for the tunnel (uploads are capped near 100 MB)';
   if (xhr.status === 0) return 'connection dropped (network, timeout, or tunnel down)';
   const body = (xhr.responseText || '').trim();
   if (body && body.length <= 120) return body + ' (HTTP ' + xhr.status + ')';
   return 'HTTP ' + xhr.status;
 }
 
+function xhrPut(url, body, onProgress) {
+  return new Promise((resolve) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', url);
+    xhr.upload.onprogress = onProgress;
+    xhr.onload = () => {
+      if (xhr.status === 200 || xhr.status === 201) {
+        let name = null;
+        try { name = JSON.parse(xhr.responseText).name; } catch (_) {}
+        resolve({ ok: true, status: xhr.status, name });
+      } else {
+        resolve({ ok: false, detail: errorDetail(xhr) });
+      }
+    };
+    xhr.onerror = () => resolve({ ok: false, detail: 'network error' });
+    xhr.send(body);
+  });
+}
+
+async function uploadChunked(file) {
+  const uploadId = generateUploadId();
+  const numChunks = Math.ceil(file.size / UPLOAD_CHUNK_SIZE);
+  let savedName = file.name;
+  for (let i = 0; i < numChunks; i++) {
+    const start = i * UPLOAD_CHUNK_SIZE;
+    const blob = file.slice(start, Math.min(start + UPLOAD_CHUNK_SIZE, file.size));
+    const url = '/upload?name=' + encodeURIComponent(file.name)
+      + '&upload_id=' + encodeURIComponent(uploadId)
+      + '&chunk=' + i
+      + '&total=' + numChunks;
+    const r = await xhrPut(url, blob, (e) => {
+      if (e.lengthComputable)
+        bar.value = ((i * UPLOAD_CHUNK_SIZE + e.loaded) / file.size) * 100;
+    });
+    if (!r.ok) return { ok: false, name: file.name, detail: r.detail };
+    if (r.name) savedName = r.name;
+  }
+  return { ok: true, name: savedName };
+}
+
 function uploadOne(file) {
+  if (file.size > UPLOAD_CHUNK_SIZE) return uploadChunked(file);
   // Resolves with a per-file result and never rejects, so one file's failure
   // does not abort the rest of the batch.
   return new Promise((resolve) => {
@@ -367,7 +444,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/":
-            body = PAGE.encode("utf-8")
+            ver = f"{VERSION} · {BUILD_TIME}" if BUILD_TIME else VERSION
+            body = PAGE.replace("__VERSION__", ver).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -430,6 +508,13 @@ class Handler(BaseHTTPRequestHandler):
             self._send_text(400, "invalid name")
             return
 
+        upload_id = qs.get("upload_id", [None])[0]
+        if upload_id is not None:
+            chunk_str = qs.get("chunk", [None])[0]
+            total_str = qs.get("total", [None])[0]
+            self._handle_chunk(name, upload_id, chunk_str, total_str)
+            return
+
         length_header = self.headers.get("Content-Length")
         try:
             remaining = int(length_header)
@@ -463,6 +548,98 @@ class Handler(BaseHTTPRequestHandler):
                 os.remove(tmp_path)
             self._send_text(500, "upload failed")
             return
+
+        self._send_json(201, {"name": os.path.basename(final_path), "uploader": handle})
+
+    def _handle_chunk(self, name, upload_id, chunk_str, total_str):
+        if not upload_id or len(upload_id) > 64 or not all(
+            c.isalnum() or c == "-" for c in upload_id
+        ):
+            self._send_text(400, "invalid upload_id")
+            return
+
+        try:
+            chunk_index = int(chunk_str)
+            total_chunks = int(total_str)
+            if chunk_index < 0 or total_chunks < 1 or chunk_index >= total_chunks:
+                raise ValueError
+        except (TypeError, ValueError):
+            self._send_text(400, "invalid chunk or total")
+            return
+
+        length_header = self.headers.get("Content-Length")
+        try:
+            remaining = int(length_header)
+            if remaining < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            self._send_text(400, "Content-Length required")
+            return
+
+        chunk_path = os.path.join(UPLOAD_DIR, f".{upload_id}.c{chunk_index}.part")
+        try:
+            with open(chunk_path, "wb") as f:
+                stream_body(self.rfile, f, remaining)
+        except IncompleteUpload:
+            if os.path.exists(chunk_path):
+                os.remove(chunk_path)
+            self._send_text(400, "incomplete upload")
+            return
+        except OSError:
+            if os.path.exists(chunk_path):
+                os.remove(chunk_path)
+            self._send_text(500, "upload failed")
+            return
+
+        if chunk_index < total_chunks - 1:
+            self._send_json(200, {"chunk": chunk_index})
+            return
+
+        # Last chunk arrived — assemble into the uploader's folder. Cloudflare
+        # Access injects the email header on every request, including this final
+        # one, so the assembled file is attributed just like a one-shot upload.
+        handle = handle_from_email(
+            self.headers.get("Cf-Access-Authenticated-User-Email")
+        )
+        handle_dir = os.path.join(UPLOAD_DIR, handle)
+        os.makedirs(handle_dir, exist_ok=True)
+
+        chunk_paths = [
+            os.path.join(UPLOAD_DIR, f".{upload_id}.c{i}.part")
+            for i in range(total_chunks)
+        ]
+        for cp in chunk_paths:
+            if not os.path.exists(cp):
+                for cp2 in chunk_paths:
+                    if os.path.exists(cp2):
+                        os.remove(cp2)
+                self._send_text(500, "missing chunk")
+                return
+
+        tmp_path = os.path.join(handle_dir, f".{uuid.uuid4().hex}.part")
+        try:
+            with open(tmp_path, "wb") as out:
+                for cp in chunk_paths:
+                    with open(cp, "rb") as inp:
+                        while True:
+                            data = inp.read(CHUNK)
+                            if not data:
+                                break
+                            out.write(data)
+            final_path = unique_path(handle_dir, name)
+            os.rename(tmp_path, final_path)
+        except (OSError, RuntimeError):
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            for cp in chunk_paths:
+                if os.path.exists(cp):
+                    os.remove(cp)
+            self._send_text(500, "assembly failed")
+            return
+
+        for cp in chunk_paths:
+            if os.path.exists(cp):
+                os.remove(cp)
 
         self._send_json(201, {"name": os.path.basename(final_path), "uploader": handle})
 
