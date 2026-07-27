@@ -1,6 +1,7 @@
 import http.client
 import json
 import os
+import re
 import tempfile
 import threading
 import unittest
@@ -350,6 +351,17 @@ class PageTests(ServerTestCase):
         # The page groups by uploader and links unsorted files without a handle.
         self.assertIn("uploader", body)
         self.assertIn("(unsorted)", body)
+
+    def test_success_results_carry_the_uploader_handle(self):
+        # Every success result the page's upload helpers resolve/return feeds
+        # dlUrl(uploader, name). One that omits `uploader` yields the literal
+        # string "undefined" in the copied link: /download/undefined/<name>.
+        literals = re.findall(
+            r"(?:return|resolve\()\s*\{ ok: true[^}]*\}", server.PAGE
+        )
+        self.assertTrue(literals, "no success-result literals found in PAGE")
+        for lit in literals:
+            self.assertIn("uploader", lit, f"missing uploader in: {lit}")
 
 
 class DownloadTests(ServerTestCase):

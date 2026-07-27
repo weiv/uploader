@@ -176,6 +176,14 @@ function addResult(name, uploader, ok, detail) {
   if (ok) {
     label.className = 'ok';
     label.textContent = '✓ ' + name;
+    if (!uploader) {
+      // Handle unknown (unparseable response): show the success, but no link —
+      // a guessed one would point at /download/undefined/. The list refresh
+      // below carries the real link.
+      row.append(label);
+      result.append(row);
+      return;
+    }
     const url = document.createElement('input');
     url.className = 'url';
     url.type = 'text';
@@ -213,9 +221,14 @@ function xhrPut(url, body, onProgress) {
     xhr.upload.onprogress = onProgress;
     xhr.onload = () => {
       if (xhr.status === 200 || xhr.status === 201) {
-        let name = null;
-        try { name = JSON.parse(xhr.responseText).name; } catch (_) {}
-        resolve({ ok: true, status: xhr.status, name });
+        // Only the final chunk's 201 carries name/uploader; intermediate 200s
+        // carry neither, so both stay null and the caller keeps what it had.
+        let name = null, uploader = null;
+        try {
+          const r = JSON.parse(xhr.responseText);
+          name = r.name || null; uploader = r.uploader || null;
+        } catch (_) {}
+        resolve({ ok: true, status: xhr.status, name, uploader });
       } else {
         resolve({ ok: false, detail: errorDetail(xhr) });
       }
@@ -228,7 +241,7 @@ function xhrPut(url, body, onProgress) {
 async function uploadChunked(file) {
   const uploadId = generateUploadId();
   const numChunks = Math.ceil(file.size / UPLOAD_CHUNK_SIZE);
-  let savedName = file.name;
+  let savedName = file.name, savedUploader = null;
   for (let i = 0; i < numChunks; i++) {
     const start = i * UPLOAD_CHUNK_SIZE;
     const blob = file.slice(start, Math.min(start + UPLOAD_CHUNK_SIZE, file.size));
@@ -242,8 +255,9 @@ async function uploadChunked(file) {
     });
     if (!r.ok) return { ok: false, name: file.name, detail: r.detail };
     if (r.name) savedName = r.name;
+    if (r.uploader) savedUploader = r.uploader;
   }
-  return { ok: true, name: savedName };
+  return { ok: true, name: savedName, uploader: savedUploader };
 }
 
 function uploadOne(file) {
@@ -260,10 +274,10 @@ function uploadOne(file) {
       if (xhr.status === 201) {
         // Server returns the final saved name (post-collision) and the handle
         // the file was filed under, so the result link is built correctly.
-        let name = file.name, uploader = '';
+        let name = file.name, uploader = null;
         try {
           const r = JSON.parse(xhr.responseText);
-          name = r.name; uploader = r.uploader;
+          name = r.name || file.name; uploader = r.uploader || null;
         } catch (e) {}
         resolve({ ok: true, name, uploader });
       } else {
