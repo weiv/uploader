@@ -1,6 +1,9 @@
 import json
 import os
+import stat
 import subprocess
+import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
@@ -11,6 +14,11 @@ CHUNK = 64 * 1024
 UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "/srv/uploader/files")
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("PORT", "8000"))
+# Abandoned chunked uploads strand one 90 MB temp per chunk, invisible in the
+# listing. 24h is deliberately generous: the point is bounding disk, not
+# promptness, and no legitimate upload runs that long.
+PART_MAX_AGE = int(os.environ.get("PART_MAX_AGE", str(24 * 3600)))
+SWEEP_INTERVAL = 3600
 VERSION = "1.1.0"
 
 
@@ -405,6 +413,94 @@ def stream_body(reader, dst, remaining):
 UNSORTED = "(unsorted)"
 
 
+def _part_group(name):
+    """Group key for a `.part` temp: the upload id for chunk temps, else itself.
+
+    `.<upload_id>.c<n>.part` -> `<upload_id>`, so every chunk of one chunked
+    upload shares a key. `.<uuid>.part` (a one-shot temp) is its own group.
+    `_handle_chunk` rejects any upload_id that is not alphanumeric-or-dash, so
+    an id can never itself contain `.c<digits>` and the split is unambiguous.
+    """
+    stem = name[1:-len(".part")]
+    head, sep, tail = stem.rpartition(".c")
+    return head if sep and tail.isdigit() else stem
+
+
+def _uploader_dirs(directory):
+    """The per-uploader folders directly under `directory` (never recursive)."""
+    try:
+        entries = os.listdir(directory)
+    except OSError:
+        return []
+    dirs = []
+    for entry in entries:
+        path = os.path.join(directory, entry)
+        if os.path.isdir(path):
+            dirs.append(path)
+    return dirs
+
+
+def sweep_parts(directory, max_age, now=None):
+    """Delete abandoned `.part` temps. Returns (files_removed, bytes_reclaimed).
+
+    Ages each upload by the **newest** mtime in its group, never per file: a
+    slow chunked upload leaves its early chunks hours old while it is still
+    running, and deleting those would strand the assembly step in
+    `_handle_chunk` on "missing chunk" after the user already waited. One
+    recent chunk therefore protects the whole group.
+
+    Tolerates files vanishing mid-sweep — a concurrent upload may rename its
+    temp away between the scan and the unlink.
+    """
+    if now is None:
+        now = time.time()
+    groups = {}
+    for parent in (directory, *_uploader_dirs(directory)):
+        try:
+            names = os.listdir(parent)
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith(".part"):
+                continue
+            path = os.path.join(parent, name)
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            key = (parent, _part_group(name))
+            entry = groups.setdefault(key, {"newest": 0.0, "files": []})
+            entry["newest"] = max(entry["newest"], st.st_mtime)
+            entry["files"].append((path, st.st_size))
+
+    removed = reclaimed = 0
+    for entry in groups.values():
+        if now - entry["newest"] <= max_age:
+            continue
+        for path, size in entry["files"]:
+            try:
+                os.remove(path)
+            except OSError:
+                continue
+            removed += 1
+            reclaimed += size
+    return removed, reclaimed
+
+
+def _sweep_loop(directory, max_age, interval):
+    """Sweep forever on `interval`. A sweep failure must never kill the server."""
+    while True:
+        time.sleep(interval)
+        try:
+            removed, reclaimed = sweep_parts(directory, max_age)
+        except Exception:
+            continue
+        if removed:
+            print(f"swept {removed} abandoned .part files ({reclaimed} bytes)")
+
+
 def list_files(directory):
     """Return file entries across uploader folders, newest mtime first.
 
@@ -660,6 +756,16 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     os.makedirs(UPLOAD_DIR, exist_ok=True)
+    # Sweep once now, then hourly: the service runs for months at a time, so a
+    # startup-only sweep would let orphans sit for the whole uptime.
+    removed, reclaimed = sweep_parts(UPLOAD_DIR, PART_MAX_AGE)
+    if removed:
+        print(f"swept {removed} abandoned .part files ({reclaimed} bytes)")
+    threading.Thread(
+        target=_sweep_loop,
+        args=(UPLOAD_DIR, PART_MAX_AGE, SWEEP_INTERVAL),
+        daemon=True,
+    ).start()
     from http.server import ThreadingHTTPServer
     httpd = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"Serving {UPLOAD_DIR} on http://{HOST}:{PORT}")

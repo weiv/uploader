@@ -2,6 +2,7 @@ import http.client
 import json
 import os
 import re
+import shutil
 import tempfile
 import threading
 import unittest
@@ -80,6 +81,112 @@ class UniquePathTests(unittest.TestCase):
         with mock.patch("os.path.exists", return_value=True):
             with self.assertRaises(RuntimeError):
                 server.unique_path(self.dir, "a.txt")
+
+
+class SweepPartsTests(unittest.TestCase):
+    """Abandoned .part temps are reclaimed; live uploads are never touched."""
+
+    HOUR = 3600
+    MAX_AGE = 24 * 3600
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.now = 1_000_000_000.0
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _part(self, name, age_seconds, subdir=None, size=4):
+        """Create a .part temp whose mtime is `age_seconds` in the past."""
+        d = self.dir if subdir is None else os.path.join(self.dir, subdir)
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, name)
+        with open(path, "wb") as f:
+            f.write(b"x" * size)
+        stamp = self.now - age_seconds
+        os.utime(path, (stamp, stamp))
+        return path
+
+    def _sweep(self):
+        return server.sweep_parts(self.dir, self.MAX_AGE, now=self.now)
+
+    def test_removes_stale_chunk_group(self):
+        a = self._part(".abc123.c0.part", 40 * self.HOUR)
+        b = self._part(".abc123.c1.part", 39 * self.HOUR)
+        removed, reclaimed = self._sweep()
+        self.assertFalse(os.path.exists(a))
+        self.assertFalse(os.path.exists(b))
+        self.assertEqual(removed, 2)
+        self.assertEqual(reclaimed, 8)
+
+    def test_keeps_whole_group_when_any_chunk_is_recent(self):
+        # THE dangerous case: a slow multi-GB upload leaves its early chunks
+        # hours old while it is still running. Ageing per-file would delete
+        # them and the final assembly would fail with "missing chunk"; the
+        # group must be aged by its NEWEST member instead.
+        old = self._part(".abc123.c0.part", 40 * self.HOUR)
+        recent = self._part(".abc123.c1.part", 2 * 60)
+        removed, reclaimed = self._sweep()
+        self.assertTrue(os.path.exists(old), "deleted a live upload's chunk")
+        self.assertTrue(os.path.exists(recent))
+        self.assertEqual((removed, reclaimed), (0, 0))
+
+    def test_distinct_upload_ids_are_aged_independently(self):
+        stale = self._part(".aaa.c0.part", 40 * self.HOUR)
+        live = self._part(".bbb.c0.part", 60)
+        self._sweep()
+        self.assertFalse(os.path.exists(stale))
+        self.assertTrue(os.path.exists(live))
+
+    def test_removes_stale_oneshot_temp_in_uploader_folder(self):
+        p = self._part(".deadbeef.part", 40 * self.HOUR, subdir="alice")
+        self._sweep()
+        self.assertFalse(os.path.exists(p))
+
+    def test_keeps_recent_oneshot_temp(self):
+        p = self._part(".deadbeef.part", 30, subdir="alice")
+        self._sweep()
+        self.assertTrue(os.path.exists(p))
+
+    def test_never_touches_real_files(self):
+        # An old real file is somebody's archive, not a temp.
+        real = os.path.join(self.dir, "alice", "ancient.zip")
+        os.makedirs(os.path.dirname(real), exist_ok=True)
+        with open(real, "wb") as f:
+            f.write(b"payload")
+        stamp = self.now - 400 * self.HOUR
+        os.utime(real, (stamp, stamp))
+        loose = os.path.join(self.dir, "dropped.txt")
+        with open(loose, "wb") as f:
+            f.write(b"y")
+        os.utime(loose, (stamp, stamp))
+        removed, _ = self._sweep()
+        self.assertTrue(os.path.exists(real))
+        self.assertTrue(os.path.exists(loose))
+        self.assertEqual(removed, 0)
+
+    def test_survives_a_file_vanishing_mid_sweep(self):
+        # A concurrent upload can rename its temp away between listdir and
+        # unlink; that must not abort the sweep or raise.
+        self._part(".gone.c0.part", 40 * self.HOUR)
+        stale = self._part(".stays.c0.part", 40 * self.HOUR)
+        real_remove = os.remove
+
+        def flaky(path):
+            real_remove(path)
+            if ".gone." in path:
+                raise FileNotFoundError(path)
+
+        from unittest import mock
+        with mock.patch("os.remove", side_effect=flaky):
+            removed, _ = server.sweep_parts(self.dir, self.MAX_AGE, now=self.now)
+        self.assertFalse(os.path.exists(stale))
+        self.assertEqual(removed, 1)
+
+    def test_empty_and_missing_directories_are_harmless(self):
+        self.assertEqual(server.sweep_parts(self.dir, self.MAX_AGE), (0, 0))
+        gone = os.path.join(self.dir, "nope")
+        self.assertEqual(server.sweep_parts(gone, self.MAX_AGE), (0, 0))
 
 
 class ServerTestCase(unittest.TestCase):
